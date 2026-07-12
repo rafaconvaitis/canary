@@ -14,6 +14,7 @@
 
 #ifndef USE_PRECOMPILED_HEADERS
 	#include <optional>
+	#include <functional>
 	#include <span>
 	#include <string>
 	#include <vector>
@@ -24,8 +25,39 @@ enum class ProtocolUnitySessionState : uint8_t {
 	AwaitingHello,
 	HelloAccepted,
 	AwaitingAuthentication,
+	Authenticated,
+	CharacterSelected,
+	EnteringWorld,
+	InWorld,
 	Closing,
 	Closed,
+};
+
+struct ProtocolUnityWorldPosition {
+	uint32_t x = 0;
+	uint32_t y = 0;
+	uint32_t floor = 0;
+};
+
+struct ProtocolUnityCharacterSummary {
+	uint32_t characterId = 0;
+	std::string name {};
+	ProtocolUnityWorldPosition position {};
+};
+
+struct ProtocolUnityLoginResponse {
+	bool success = false;
+	std::string message {};
+	uint32_t accountId = 0;
+	std::vector<ProtocolUnityCharacterSummary> characters {};
+};
+
+struct ProtocolUnityEnterWorldResponse {
+	bool success = false;
+	bool selectionAccepted = false;
+	std::string message {};
+	uint32_t actorId = 0;
+	ProtocolUnityWorldPosition spawnPosition {};
 };
 
 struct ProtocolUnitySessionAction {
@@ -35,30 +67,43 @@ struct ProtocolUnitySessionAction {
 
 class ProtocolUnitySession {
 public:
+	using LoginHandler = std::function<ProtocolUnityLoginResponse(std::string_view accountDescriptor, std::string_view secret)>;
+	using EnterWorldHandler = std::function<ProtocolUnityEnterWorldResponse(uint32_t accountId, uint32_t characterId)>;
+
 	ProtocolUnitySession(
 		const ProtocolUnityContract &initContract,
 		std::string initServerName,
 		uint16_t initAdvertisedPacketLimit,
-		uint8_t initSupportedCapabilities = 1
+		uint8_t initSupportedCapabilities = 1,
+		LoginHandler initLoginHandler = {},
+		EnterWorldHandler initEnterWorldHandler = {}
 	);
 
 	[[nodiscard]] ProtocolUnitySessionState getState() const;
 	[[nodiscard]] uint32_t getViolationCount() const;
 	[[nodiscard]] const std::string &getClientName() const;
 	[[nodiscard]] const std::string &getClientVersionLabel() const;
+	[[nodiscard]] uint32_t getAuthenticatedAccountId() const;
+	[[nodiscard]] const std::vector<ProtocolUnityCharacterSummary> &getCharacters() const;
 
 	[[nodiscard]] ProtocolUnitySessionAction handleFrame(std::span<const uint8_t> frameBytes);
 
 private:
 	[[nodiscard]] ProtocolUnitySessionAction handleDecodedFrame(const ProtocolUnityFrameView &frame);
 	[[nodiscard]] ProtocolUnitySessionAction handleClientHello(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleLoginRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleEnterWorldRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handlePing(std::span<const uint8_t> payload) const;
 	[[nodiscard]] ProtocolUnitySessionAction reject(std::string_view code, std::string_view detail, bool countViolation, bool closeConnection);
 	[[nodiscard]] std::vector<uint8_t> buildServerHelloFrame() const;
+	[[nodiscard]] std::vector<uint8_t> buildLoginResultFrame(const ProtocolUnityLoginResponse &response) const;
+	[[nodiscard]] std::vector<uint8_t> buildCharacterListFrame(std::span<const ProtocolUnityCharacterSummary> characters) const;
+	[[nodiscard]] std::vector<uint8_t> buildEnterWorldResultFrame(const ProtocolUnityEnterWorldResponse &response) const;
 	[[nodiscard]] std::vector<uint8_t> buildErrorFrame(std::string_view code, std::string_view detail) const;
 	[[nodiscard]] std::vector<uint8_t> buildPongFrame(uint64_t timestamp) const;
 	void transitionTo(ProtocolUnitySessionState nextState);
 	[[nodiscard]] bool shouldDisconnectAfterViolation() const;
+	[[nodiscard]] bool hasCharacter(uint32_t characterId) const;
 
 	const ProtocolUnityContract &contract;
 	std::string serverName {};
@@ -69,6 +114,10 @@ private:
 	std::string clientName {};
 	std::string clientVersionLabel {};
 	uint8_t clientCapabilities = 0;
+	uint32_t authenticatedAccountId = 0;
+	std::vector<ProtocolUnityCharacterSummary> characters {};
+	LoginHandler loginHandler {};
+	EnterWorldHandler enterWorldHandler {};
 };
 
 class ProtocolUnity final : public Protocol {

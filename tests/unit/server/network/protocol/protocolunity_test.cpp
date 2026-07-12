@@ -58,6 +58,27 @@ namespace {
 		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, 1);
 	}
 
+	[[nodiscard]] ProtocolUnitySession makeSession(
+		ProtocolUnitySession::LoginHandler loginHandler,
+		ProtocolUnitySession::EnterWorldHandler enterWorldHandler = {}
+	) {
+		const auto &contract = getProtocolUnityContract();
+		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, 1, std::move(loginHandler), std::move(enterWorldHandler));
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildLoginRequestFrame(std::string_view accountDescriptor, std::string_view secret) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::LoginRequest);
+		writer.writeString(accountDescriptor);
+		writer.writeString(secret);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildEnterWorldRequestFrame(uint32_t characterId) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::EnterWorldRequest);
+		writer.writeU32(characterId);
+		return writer.finalize();
+	}
+
 	[[nodiscard]] ProtocolUnityFrameView decodeResponse(const std::vector<uint8_t> &frameBytes) {
 		return ProtocolUnityFrameCodec::decode(frameBytes, getProtocolUnityContract());
 	}
@@ -124,6 +145,142 @@ TEST(ProtocolUnitySessionTest, PingAfterHelloEchoesTimestampInPong) {
 
 	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
 	EXPECT_EQ(123456789ULL, reader.readU64());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, LoginRequestAfterHelloReturnsLoginResultAndCharacterList) {
+	auto session = makeSession(
+		[](std::string_view accountDescriptor, std::string_view secret) {
+			EXPECT_EQ("dev.alpha", accountDescriptor);
+			EXPECT_EQ("plain-secret", secret);
+
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.message = "Login accepted.";
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+				ProtocolUnityCharacterSummary { .characterId = 22, .name = "Sorcerer", .position = { .x = 300, .y = 400, .floor = 6 } },
+			};
+			return response;
+		}
+	);
+	const auto helloFrame = ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex);
+	const auto loginFrame = buildLoginRequestFrame("dev.alpha", "plain-secret");
+
+	(void)session.handleFrame(helloFrame);
+	const auto action = session.handleFrame(loginFrame);
+
+	ASSERT_EQ(ProtocolUnitySessionState::Authenticated, session.getState());
+	ASSERT_EQ(77U, session.getAuthenticatedAccountId());
+	ASSERT_EQ(2U, session.getCharacters().size());
+	ASSERT_FALSE(action.closeConnection);
+	ASSERT_EQ(2U, action.outboundFrames.size());
+
+	const auto loginResult = decodeResponse(action.outboundFrames[0]);
+	EXPECT_EQ(ProtocolUnityOpcode::LoginResult, loginResult.opcode);
+	ProtocolUnityPacketReader loginReader(loginResult.payload, getProtocolUnityContract());
+	EXPECT_EQ(1, loginReader.readByte());
+	EXPECT_EQ("Login accepted.", loginReader.readString());
+	EXPECT_EQ(77U, loginReader.readU32());
+	EXPECT_NO_THROW(loginReader.expectFullyConsumed());
+
+	const auto characterList = decodeResponse(action.outboundFrames[1]);
+	EXPECT_EQ(ProtocolUnityOpcode::CharacterList, characterList.opcode);
+	ProtocolUnityPacketReader characterReader(characterList.payload, getProtocolUnityContract());
+	EXPECT_EQ(2, characterReader.readU16());
+	EXPECT_EQ(11U, characterReader.readU32());
+	EXPECT_EQ("Knight", characterReader.readString());
+	EXPECT_EQ(100U, characterReader.readU32());
+	EXPECT_EQ(200U, characterReader.readU32());
+	EXPECT_EQ(7U, characterReader.readU32());
+	EXPECT_EQ(22U, characterReader.readU32());
+	EXPECT_EQ("Sorcerer", characterReader.readString());
+	EXPECT_EQ(300U, characterReader.readU32());
+	EXPECT_EQ(400U, characterReader.readU32());
+	EXPECT_EQ(6U, characterReader.readU32());
+	EXPECT_NO_THROW(characterReader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, FailedLoginReturnsOnlyLoginResultAndKeepsAuthenticationState) {
+	auto session = makeSession(
+		[](std::string_view accountDescriptor, std::string_view secret) {
+			EXPECT_EQ("dev.alpha", accountDescriptor);
+			EXPECT_EQ("bad-secret", secret);
+
+			ProtocolUnityLoginResponse response;
+			response.success = false;
+			response.message = "Account or secret is not correct.";
+			return response;
+		}
+	);
+	const auto helloFrame = ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex);
+	const auto loginFrame = buildLoginRequestFrame("dev.alpha", "bad-secret");
+
+	(void)session.handleFrame(helloFrame);
+	const auto action = session.handleFrame(loginFrame);
+
+	ASSERT_EQ(ProtocolUnitySessionState::AwaitingAuthentication, session.getState());
+	ASSERT_EQ(0U, session.getAuthenticatedAccountId());
+	ASSERT_EQ(0U, session.getCharacters().size());
+	ASSERT_FALSE(action.closeConnection);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+
+	const auto loginResult = decodeResponse(action.outboundFrames[0]);
+	EXPECT_EQ(ProtocolUnityOpcode::LoginResult, loginResult.opcode);
+	ProtocolUnityPacketReader reader(loginResult.payload, getProtocolUnityContract());
+	EXPECT_EQ(0, reader.readByte());
+	EXPECT_EQ("Account or secret is not correct.", reader.readString());
+	EXPECT_EQ(0U, reader.readU32());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, EnterWorldAfterAuthenticatedLoginValidatesSelectionAndReturnsStructuredResult) {
+	auto session = makeSession(
+		[](std::string_view, std::string_view) {
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.message = "Login accepted.";
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+			};
+			return response;
+		},
+		[](uint32_t accountId, uint32_t characterId) {
+			EXPECT_EQ(77U, accountId);
+			EXPECT_EQ(11U, characterId);
+
+			ProtocolUnityEnterWorldResponse response;
+			response.success = false;
+			response.selectionAccepted = true;
+			response.message = "ProtocolUnity world entry is not connected to a live Player session yet.";
+			response.actorId = 11;
+			response.spawnPosition = { .x = 100, .y = 200, .floor = 7 };
+			return response;
+		}
+	);
+	const auto helloFrame = ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex);
+	const auto loginFrame = buildLoginRequestFrame("dev.alpha", "plain-secret");
+	const auto enterWorldFrame = buildEnterWorldRequestFrame(11);
+
+	(void)session.handleFrame(helloFrame);
+	(void)session.handleFrame(loginFrame);
+	const auto action = session.handleFrame(enterWorldFrame);
+
+	ASSERT_EQ(ProtocolUnitySessionState::CharacterSelected, session.getState());
+	ASSERT_FALSE(action.closeConnection);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+
+	const auto result = decodeResponse(action.outboundFrames[0]);
+	EXPECT_EQ(ProtocolUnityOpcode::EnterWorldResult, result.opcode);
+	ProtocolUnityPacketReader reader(result.payload, getProtocolUnityContract());
+	EXPECT_EQ(0, reader.readByte());
+	EXPECT_EQ("ProtocolUnity world entry is not connected to a live Player session yet.", reader.readString());
+	EXPECT_EQ(11U, reader.readU32());
+	EXPECT_EQ(100U, reader.readU32());
+	EXPECT_EQ(200U, reader.readU32());
+	EXPECT_EQ(7U, reader.readU32());
 	EXPECT_NO_THROW(reader.expectFullyConsumed());
 }
 
