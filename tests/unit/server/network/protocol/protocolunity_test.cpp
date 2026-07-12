@@ -188,17 +188,17 @@ TEST(ProtocolUnitySessionTest, LoginRequestAfterHelloReturnsLoginResultAndCharac
 	const auto characterList = decodeResponse(action.outboundFrames[1]);
 	EXPECT_EQ(ProtocolUnityOpcode::CharacterList, characterList.opcode);
 	ProtocolUnityPacketReader characterReader(characterList.payload, getProtocolUnityContract());
-	EXPECT_EQ(2, characterReader.readU16());
+	EXPECT_EQ(2, characterReader.readByte());
 	EXPECT_EQ(11U, characterReader.readU32());
 	EXPECT_EQ("Knight", characterReader.readString());
-	EXPECT_EQ(100U, characterReader.readU32());
-	EXPECT_EQ(200U, characterReader.readU32());
-	EXPECT_EQ(7U, characterReader.readU32());
+	EXPECT_EQ(100, characterReader.readI32());
+	EXPECT_EQ(200, characterReader.readI32());
+	EXPECT_EQ(7, characterReader.readI32());
 	EXPECT_EQ(22U, characterReader.readU32());
 	EXPECT_EQ("Sorcerer", characterReader.readString());
-	EXPECT_EQ(300U, characterReader.readU32());
-	EXPECT_EQ(400U, characterReader.readU32());
-	EXPECT_EQ(6U, characterReader.readU32());
+	EXPECT_EQ(300, characterReader.readI32());
+	EXPECT_EQ(400, characterReader.readI32());
+	EXPECT_EQ(6, characterReader.readI32());
 	EXPECT_NO_THROW(characterReader.expectFullyConsumed());
 }
 
@@ -252,11 +252,11 @@ TEST(ProtocolUnitySessionTest, EnterWorldAfterAuthenticatedLoginValidatesSelecti
 			EXPECT_EQ(11U, characterId);
 
 			ProtocolUnityEnterWorldResponse response;
-			response.success = false;
+			response.success = true;
 			response.selectionAccepted = true;
-			response.message = "ProtocolUnity world entry is not connected to a live Player session yet.";
-			response.actorId = 11;
-			response.spawnPosition = { .x = 100, .y = 200, .floor = 7 };
+			response.message = "Entered world.";
+			response.actorId = 1100;
+			response.spawnPosition = { .x = 8, .y = 6, .floor = 7 };
 			return response;
 		}
 	);
@@ -268,19 +268,19 @@ TEST(ProtocolUnitySessionTest, EnterWorldAfterAuthenticatedLoginValidatesSelecti
 	(void)session.handleFrame(loginFrame);
 	const auto action = session.handleFrame(enterWorldFrame);
 
-	ASSERT_EQ(ProtocolUnitySessionState::CharacterSelected, session.getState());
+	ASSERT_EQ(ProtocolUnitySessionState::InWorld, session.getState());
 	ASSERT_FALSE(action.closeConnection);
 	ASSERT_EQ(1U, action.outboundFrames.size());
 
 	const auto result = decodeResponse(action.outboundFrames[0]);
 	EXPECT_EQ(ProtocolUnityOpcode::EnterWorldResult, result.opcode);
 	ProtocolUnityPacketReader reader(result.payload, getProtocolUnityContract());
-	EXPECT_EQ(0, reader.readByte());
-	EXPECT_EQ("ProtocolUnity world entry is not connected to a live Player session yet.", reader.readString());
-	EXPECT_EQ(11U, reader.readU32());
-	EXPECT_EQ(100U, reader.readU32());
-	EXPECT_EQ(200U, reader.readU32());
-	EXPECT_EQ(7U, reader.readU32());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ("Entered world.", reader.readString());
+	EXPECT_EQ(1100U, reader.readU32());
+	EXPECT_EQ(8, reader.readI32());
+	EXPECT_EQ(6, reader.readI32());
+	EXPECT_EQ(7, reader.readI32());
 	EXPECT_NO_THROW(reader.expectFullyConsumed());
 }
 

@@ -132,8 +132,11 @@ public:
 	[[nodiscard]] size_t remaining() const;
 
 	[[nodiscard]] uint8_t readByte();
+	[[nodiscard]] int16_t readI16();
 	[[nodiscard]] uint16_t readU16();
+	[[nodiscard]] int32_t readI32();
 	[[nodiscard]] uint32_t readU32();
+	[[nodiscard]] int64_t readI64();
 	[[nodiscard]] uint64_t readU64();
 	[[nodiscard]] std::string readString();
 	void expectFullyConsumed() const;
@@ -158,8 +161,11 @@ public:
 	ProtocolUnityPacketWriter(const ProtocolUnityContract &initContract, ProtocolUnityOpcode initOpcode);
 
 	void writeByte(uint8_t value);
+	void writeI16(int16_t value);
 	void writeU16(uint16_t value);
+	void writeI32(int32_t value);
 	void writeU32(uint32_t value);
+	void writeI64(int64_t value);
 	void writeU64(uint64_t value);
 	void writeString(std::string_view value);
 

@@ -295,12 +295,24 @@ uint8_t ProtocolUnityPacketReader::readByte() {
 	return readLittleEndian<uint8_t>();
 }
 
+int16_t ProtocolUnityPacketReader::readI16() {
+	return readLittleEndian<int16_t>();
+}
+
 uint16_t ProtocolUnityPacketReader::readU16() {
 	return readLittleEndian<uint16_t>();
 }
 
+int32_t ProtocolUnityPacketReader::readI32() {
+	return readLittleEndian<int32_t>();
+}
+
 uint32_t ProtocolUnityPacketReader::readU32() {
 	return readLittleEndian<uint32_t>();
+}
+
+int64_t ProtocolUnityPacketReader::readI64() {
+	return readLittleEndian<int64_t>();
 }
 
 uint64_t ProtocolUnityPacketReader::readU64() {
@@ -430,12 +442,27 @@ void ProtocolUnityPacketWriter::writeByte(uint8_t value) {
 	payload.push_back(value);
 }
 
+void ProtocolUnityPacketWriter::writeI16(int16_t value) {
+	ensurePayloadCapacity(sizeof(value));
+	writeLittleEndian(value);
+}
+
 void ProtocolUnityPacketWriter::writeU16(uint16_t value) {
 	ensurePayloadCapacity(sizeof(value));
 	writeLittleEndian(value);
 }
 
+void ProtocolUnityPacketWriter::writeI32(int32_t value) {
+	ensurePayloadCapacity(sizeof(value));
+	writeLittleEndian(value);
+}
+
 void ProtocolUnityPacketWriter::writeU32(uint32_t value) {
+	ensurePayloadCapacity(sizeof(value));
+	writeLittleEndian(value);
+}
+
+void ProtocolUnityPacketWriter::writeI64(int64_t value) {
 	ensurePayloadCapacity(sizeof(value));
 	writeLittleEndian(value);
 }
@@ -495,8 +522,11 @@ void ProtocolUnityPacketWriter::writeLittleEndian(T value) {
 }
 
 template uint8_t ProtocolUnityPacketReader::readLittleEndian<uint8_t>();
+template int16_t ProtocolUnityPacketReader::readLittleEndian<int16_t>();
 template uint16_t ProtocolUnityPacketReader::readLittleEndian<uint16_t>();
+template int32_t ProtocolUnityPacketReader::readLittleEndian<int32_t>();
 template uint32_t ProtocolUnityPacketReader::readLittleEndian<uint32_t>();
+template int64_t ProtocolUnityPacketReader::readLittleEndian<int64_t>();
 template uint64_t ProtocolUnityPacketReader::readLittleEndian<uint64_t>();
 template void ProtocolUnityPacketWriter::writeLittleEndian<uint16_t>(uint16_t value);
 template void ProtocolUnityPacketWriter::writeLittleEndian<uint32_t>(uint32_t value);

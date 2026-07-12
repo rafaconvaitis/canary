@@ -12,11 +12,19 @@
 #include "server/network/protocol/protocol.hpp"
 #include "server/network/protocol/protocolunity_contract.hpp"
 
+class Player;
+class Creature;
+class Item;
+class Tile;
+struct Position;
+
 #ifndef USE_PRECOMPILED_HEADERS
 	#include <optional>
 	#include <functional>
+	#include <memory>
 	#include <span>
 	#include <string>
+	#include <unordered_set>
 	#include <vector>
 #endif
 
@@ -34,9 +42,9 @@ enum class ProtocolUnitySessionState : uint8_t {
 };
 
 struct ProtocolUnityWorldPosition {
-	uint32_t x = 0;
-	uint32_t y = 0;
-	uint32_t floor = 0;
+	int32_t x = 0;
+	int32_t y = 0;
+	int32_t floor = 0;
 };
 
 struct ProtocolUnityCharacterSummary {
@@ -60,6 +68,47 @@ struct ProtocolUnityEnterWorldResponse {
 	ProtocolUnityWorldPosition spawnPosition {};
 };
 
+enum class ProtocolUnityActorKind : uint8_t {
+	Player = 1,
+	Monster = 2,
+};
+
+enum class ProtocolUnityActorDisposition : uint8_t {
+	Friendly = 1,
+	Hostile = 2,
+	Neutral = 3,
+};
+
+struct ProtocolUnityActorState {
+	uint32_t actorId = 0;
+	std::string name {};
+	ProtocolUnityActorKind kind = ProtocolUnityActorKind::Player;
+	ProtocolUnityWorldPosition position {};
+	uint8_t direction = 0;
+	uint16_t health = 0;
+	uint16_t maxHealth = 0;
+	uint16_t mana = 0;
+	uint16_t maxMana = 0;
+	ProtocolUnityActorDisposition disposition = ProtocolUnityActorDisposition::Neutral;
+	bool isDead = false;
+};
+
+struct ProtocolUnityTileState {
+	int16_t localX = 0;
+	int16_t localY = 0;
+	bool blocked = false;
+	uint8_t height = 0;
+	uint16_t tileId = 0;
+};
+
+struct ProtocolUnityInventorySlotState {
+	uint8_t slotIndex = 0;
+	uint16_t itemTypeId = 0;
+	std::string name {};
+	uint16_t quantity = 0;
+	uint16_t stackLimit = 0;
+};
+
 struct ProtocolUnitySessionAction {
 	std::vector<std::vector<uint8_t>> outboundFrames {};
 	bool closeConnection = false;
@@ -69,6 +118,7 @@ class ProtocolUnitySession {
 public:
 	using LoginHandler = std::function<ProtocolUnityLoginResponse(std::string_view accountDescriptor, std::string_view secret)>;
 	using EnterWorldHandler = std::function<ProtocolUnityEnterWorldResponse(uint32_t accountId, uint32_t characterId)>;
+	using MovementHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint8_t direction)>;
 
 	ProtocolUnitySession(
 		const ProtocolUnityContract &initContract,
@@ -76,7 +126,8 @@ public:
 		uint16_t initAdvertisedPacketLimit,
 		uint8_t initSupportedCapabilities = 1,
 		LoginHandler initLoginHandler = {},
-		EnterWorldHandler initEnterWorldHandler = {}
+		EnterWorldHandler initEnterWorldHandler = {},
+		MovementHandler initMovementHandler = {}
 	);
 
 	[[nodiscard]] ProtocolUnitySessionState getState() const;
@@ -93,6 +144,7 @@ private:
 	[[nodiscard]] ProtocolUnitySessionAction handleClientHello(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleLoginRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleEnterWorldRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleMovementRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handlePing(std::span<const uint8_t> payload) const;
 	[[nodiscard]] ProtocolUnitySessionAction reject(std::string_view code, std::string_view detail, bool countViolation, bool closeConnection);
 	[[nodiscard]] std::vector<uint8_t> buildServerHelloFrame() const;
@@ -118,6 +170,7 @@ private:
 	std::vector<ProtocolUnityCharacterSummary> characters {};
 	LoginHandler loginHandler {};
 	EnterWorldHandler enterWorldHandler {};
+	MovementHandler movementHandler {};
 };
 
 class ProtocolUnity final : public Protocol {
@@ -137,10 +190,28 @@ public:
 
 private:
 	void parsePacket(NetworkMessage &msg) override;
+	void release() override;
 	void processFrame(NetworkMessage &msg);
 	void sendRawFrame(std::span<const uint8_t> frameBytes) const;
+	void cleanupActivePlayer();
+	[[nodiscard]] ProtocolUnityEnterWorldResponse enterWorld(uint32_t accountId, uint32_t characterId);
+	[[nodiscard]] std::vector<std::vector<uint8_t>> buildPendingWorldBootstrapFrames();
+	[[nodiscard]] std::vector<uint8_t> buildCreatureSpawnFrame(const ProtocolUnityActorState &actor) const;
+	[[nodiscard]] std::vector<uint8_t> buildCreatureDespawnFrame(uint32_t actorId, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildInventorySnapshotFrame(uint32_t actorId, std::span<const ProtocolUnityInventorySlotState> slots) const;
+	[[nodiscard]] std::vector<uint8_t> buildMapSnapshotFrame(int32_t width, int32_t height, int32_t floor, std::span<const ProtocolUnityTileState> tiles) const;
+	[[nodiscard]] std::vector<uint8_t> buildMovementResultFrame(uint32_t actorId, const ProtocolUnityWorldPosition &position, bool accepted, std::string_view reason) const;
+	[[nodiscard]] ProtocolUnitySessionAction moveActivePlayer(uint32_t actorId, uint8_t direction);
+	[[nodiscard]] ProtocolUnityActorState captureActorState(const std::shared_ptr<Creature> &creature) const;
+	[[nodiscard]] std::vector<ProtocolUnityInventorySlotState> captureInventorySnapshot() const;
+	[[nodiscard]] std::vector<ProtocolUnityTileState> captureMapSnapshotTiles(int32_t &width, int32_t &height, int32_t &floor);
+	[[nodiscard]] ProtocolUnityWorldPosition captureViewportPosition(const Position &position) const;
 	[[nodiscard]] ProtocolUnitySession &getSession();
 	[[nodiscard]] static const ProtocolUnityContract &getContract();
 
 	std::optional<ProtocolUnitySession> session {};
+	std::shared_ptr<Player> activePlayer = nullptr;
+	bool pendingWorldBootstrap = false;
+	std::unordered_set<uint32_t> visibleActorIds {};
+	ProtocolUnityWorldPosition snapshotOrigin {};
 };
