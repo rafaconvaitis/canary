@@ -54,6 +54,7 @@
 #include "server/network/protocol/protocol_port_utils.hpp"
 #include "server/network/protocol/protocolstatus.hpp"
 #include "server/network/protocol/protocolgame.hpp"
+#include "server/network/protocol/protocolunity.hpp"
 #include "server/network/webhook/webhook.hpp"
 #include "server/server.hpp"
 #include "utils/tools.hpp"
@@ -781,6 +782,10 @@ void Game::start(ServiceManager* manager) {
 	manager->add<ProtocolLogin>(static_cast<uint16_t>(g_configManager().getNumber(LOGIN_PORT)));
 	// OT protocols
 	manager->add<ProtocolStatus>(static_cast<uint16_t>(g_configManager().getNumber(STATUS_PORT)));
+	if (const auto protocolUnityPort = static_cast<uint16_t>(g_configManager().getNumber(PROTOCOL_UNITY_PORT));
+	    protocolUnityPort != 0) {
+		manager->add<ProtocolUnity>(protocolUnityPort, g_configManager().getString(PROTOCOL_UNITY_BIND_ADDRESS));
+	}
 
 	serviceManager = manager;
 

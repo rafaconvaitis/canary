@@ -90,6 +90,7 @@ public:
 	[[nodiscard]] InitialTransportState getInitialTransportState() const;
 
 private:
+	[[nodiscard]] size_t getCurrentHeaderLength() const;
 	void parseProxyIdentification(const std::error_code &error);
 	void parseHeader(const std::error_code &error);
 	void parsePacket(const std::error_code &error);

@@ -94,6 +94,7 @@ enum class TransportProfileId : uint8_t {
 	CurrentModern,
 	LegacyRawWithLoginHeader,
 	LegacyClassic,
+	ProtocolUnity,
 };
 
 enum class OuterLengthEncoding : uint8_t {
@@ -121,6 +122,7 @@ struct TransportProfile {
 	ChecksumMethods_t outboundChecksum = CHECKSUM_METHOD_NONE;
 	CompressionLayout compression = CompressionLayout::None;
 	uint16_t modernLengthExtraBytes = 0;
+	uint8_t outerHeaderBytes = sizeof(uint16_t);
 	uint8_t serverFirstPacketHeaderBytes = 0;
 	bool hasCryptoHeader = false;
 	bool lengthIncludesChecksum = false;

@@ -145,14 +145,23 @@ void ServicePort::openAcceptor(const std::weak_ptr<ServicePort> &weak_service, u
 	}
 }
 
-void ServicePort::open(uint16_t port) {
+void ServicePort::openAcceptor(const std::weak_ptr<ServicePort> &weak_service, uint16_t port, const std::string &bindAddress) {
+	if (const auto service = weak_service.lock()) {
+		service->open(port, bindAddress);
+	}
+}
+
+void ServicePort::open(uint16_t port, const std::string &desiredBindAddress /*= {}*/) {
 	close();
 
 	serverPort = port;
 	pendingStart = false;
+	bindAddress = desiredBindAddress;
 
 	try {
-		if (g_configManager().getBoolean(BIND_ONLY_GLOBAL_ADDRESS)) {
+		if (!bindAddress.empty()) {
+			acceptor = std::make_unique<asio::ip::tcp::acceptor>(io_service, asio::ip::tcp::endpoint(asio::ip::address::from_string(bindAddress), serverPort));
+		} else if (g_configManager().getBoolean(BIND_ONLY_GLOBAL_ADDRESS)) {
 			acceptor = std::make_unique<asio::ip::tcp::acceptor>(io_service, asio::ip::tcp::endpoint(asio::ip::address(asio::ip::address_v4::from_string(g_configManager().getString(IP))), serverPort));
 		} else {
 			acceptor = std::make_unique<asio::ip::tcp::acceptor>(io_service, asio::ip::tcp::endpoint(asio::ip::address(asio::ip::address_v4(INADDR_ANY)), serverPort));
@@ -167,7 +176,7 @@ void ServicePort::open(uint16_t port) {
 		pendingStart = true;
 		g_dispatcher().scheduleEvent(
 			15000,
-			[self = shared_from_this(), port] { ServicePort::openAcceptor(std::weak_ptr<ServicePort>(self), port); }, "ServicePort::openAcceptor"
+			[self = shared_from_this(), port, bindAddress = bindAddress] { ServicePort::openAcceptor(std::weak_ptr<ServicePort>(self), port, bindAddress); }, "ServicePort::openAcceptor"
 		);
 	}
 }

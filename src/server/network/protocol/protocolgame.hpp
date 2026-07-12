@@ -153,6 +153,9 @@ private:
 	void onRecvFirstMessage(NetworkMessage &msg) override;
 	void onConnectionAccepted() override;
 	void sendLoginChallenge() override;
+	[[nodiscard]] bool requiresProxyIdentificationPrelude() const override {
+		return true;
+	}
 
 	// Parse methods
 	void parseAutoWalk(NetworkMessage &msg);

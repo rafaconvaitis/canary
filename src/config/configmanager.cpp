@@ -57,6 +57,7 @@ bool ConfigManager::load() {
 		loadIntConfig(L, GAME_PORT, "gameProtocolPort", 7172);
 		loadIntConfig(L, LEGACY_1100_GAME_PORT, "legacy1100GameProtocolPort", 0);
 		loadIntConfig(L, LEGACY_860_GAME_PORT, "legacy860GameProtocolPort", 0);
+		loadIntConfig(L, PROTOCOL_UNITY_PORT, "protocolUnityPort", 7173);
 		loadIntConfig(L, LOGIN_PORT, "loginProtocolPort", 7171);
 		loadIntConfig(L, MARKET_OFFER_DURATION, "marketOfferDuration", 30 * 24 * 60 * 60);
 		loadIntConfig(L, MARKET_REFRESH_PRICES, "marketRefreshPricesInterval", 30);
@@ -68,6 +69,7 @@ bool ConfigManager::load() {
 		loadStringConfig(L, HOUSE_RENT_PERIOD, "houseRentPeriod", "never");
 		loadStringConfig(L, IP, "ip", "127.0.0.1");
 		loadStringConfig(L, MAINTAIN_MODE_MESSAGE, "maintainModeMessage", "");
+		loadStringConfig(L, PROTOCOL_UNITY_BIND_ADDRESS, "protocolUnityBindAddress", "127.0.0.1");
 		loadStringConfig(L, MAP_AUTHOR, "mapAuthor", "Eduardo Dantas");
 		loadStringConfig(L, MAP_DOWNLOAD_URL, "mapDownloadUrl", "");
 		loadStringConfig(L, MAP_NAME, "mapName", "canary");

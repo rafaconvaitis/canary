@@ -37,6 +37,9 @@ public:
 	virtual void onRecvFirstMessage(NetworkMessage &msg) = 0;
 	virtual void onConnectionAccepted();
 	virtual void sendLoginChallenge() { }
+	[[nodiscard]] virtual bool requiresProxyIdentificationPrelude() const {
+		return false;
+	}
 
 	bool isConnectionExpired() const;
 

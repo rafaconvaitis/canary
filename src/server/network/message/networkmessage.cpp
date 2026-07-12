@@ -257,8 +257,16 @@ void NetworkMessage::setBufferPosition(NetworkMessage::MsgSize_t newPosition) {
 	info.position = newPosition;
 }
 
-uint16_t NetworkMessage::getLengthHeader() const {
-	return static_cast<uint16_t>(buffer[0] | buffer[1] << 8);
+uint32_t NetworkMessage::getLengthHeader(size_t headerBytes /*= HEADER_LENGTH*/) const {
+	if (headerBytes == 0 || headerBytes > sizeof(uint32_t)) {
+		return 0;
+	}
+
+	uint32_t header = 0;
+	for (size_t index = 0; index < headerBytes; ++index) {
+		header |= static_cast<uint32_t>(buffer[index]) << (index * 8);
+	}
+	return header;
 }
 
 bool NetworkMessage::isOverrun() const {
@@ -273,11 +281,10 @@ const uint8_t* NetworkMessage::getBuffer() const {
 	return buffer.data();
 }
 
-uint8_t* NetworkMessage::getBodyBuffer() {
-	info.position = 2;
+uint8_t* NetworkMessage::getBodyBuffer(size_t headerBytes /*= HEADER_LENGTH*/) {
+	info.position = static_cast<MsgSize_t>(headerBytes);
 	// Return the pointer to the body of the buffer starting after the header
-	// Convert HEADER_LENGTH to uintptr_t to ensure safe pointer arithmetic with enum type
-	return buffer.data() + static_cast<std::uintptr_t>(HEADER_LENGTH);
+	return buffer.data() + static_cast<std::uintptr_t>(headerBytes);
 }
 
 bool NetworkMessage::canAdd(size_t size) const {
