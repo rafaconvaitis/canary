@@ -13,6 +13,7 @@
 #include "account/account_repository.hpp"
 #include "config/configmanager.hpp"
 #include "core.hpp"
+#include "creatures/combat/combat.hpp"
 #include "creatures/monsters/monster.hpp"
 #include "creatures/players/player.hpp"
 #include "creatures/players/management/ban.hpp"
@@ -125,6 +126,36 @@ namespace {
 		return static_cast<uint16_t>(std::clamp<T>(value, 0, std::numeric_limits<uint16_t>::max()));
 	}
 
+	template <typename T>
+	[[nodiscard]] int16_t clampToI16(T value) {
+		return static_cast<int16_t>(std::clamp<T>(value, std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max()));
+	}
+
+	[[nodiscard]] std::string_view toProtocolUnityCombatReason(ReturnValue value) {
+		switch (value) {
+			case RETURNVALUE_CREATUREDOESNOTEXIST:
+				return "unknown_target";
+			case RETURNVALUE_YOUAREEXHAUSTED:
+				return "cooldown";
+			case RETURNVALUE_CANNOTTHROW:
+			case RETURNVALUE_DIRECTPLAYERSHOOT:
+			case RETURNVALUE_PLAYERISNOTREACHABLE:
+			case RETURNVALUE_CREATUREISNOTREACHABLE:
+				return "out_of_range";
+			case RETURNVALUE_ACTIONNOTPERMITTEDINPROTECTIONZONE:
+			case RETURNVALUE_ACTIONNOTPERMITTEDINANOPVPZONE:
+			case RETURNVALUE_YOUMAYNOTATTACKAPERSONINPROTECTIONZONE:
+			case RETURNVALUE_YOUMAYNOTATTACKAPERSONWHILEINPROTECTIONZONE:
+				return "protection_zone";
+			case RETURNVALUE_YOUMAYNOTATTACKTHISPLAYER:
+			case RETURNVALUE_YOUMAYNOTATTACKTHISCREATURE:
+			case RETURNVALUE_TURNSECUREMODETOATTACKUNMARKEDPLAYERS:
+				return "cannot_target";
+			default:
+				return "cannot_target";
+		}
+	}
+
 	[[nodiscard]] std::optional<ProtocolUnityCharacterSummary> loadProtocolUnityCharacterSummary(const std::string &characterName) {
 		auto player = std::make_shared<Player>(std::shared_ptr<ProtocolGame> {});
 		player->setName(characterName);
@@ -200,7 +231,8 @@ ProtocolUnitySession::ProtocolUnitySession(
 	uint8_t initSupportedCapabilities,
 	LoginHandler initLoginHandler,
 	EnterWorldHandler initEnterWorldHandler,
-	MovementHandler initMovementHandler
+	MovementHandler initMovementHandler,
+	AttackHandler initAttackHandler
 ) :
 	contract(initContract),
 	serverName(std::move(initServerName)),
@@ -208,7 +240,8 @@ ProtocolUnitySession::ProtocolUnitySession(
 	supportedCapabilities(initSupportedCapabilities),
 	loginHandler(std::move(initLoginHandler)),
 	enterWorldHandler(std::move(initEnterWorldHandler)),
-	movementHandler(std::move(initMovementHandler)) {
+	movementHandler(std::move(initMovementHandler)),
+	attackHandler(std::move(initAttackHandler)) {
 	transitionTo(ProtocolUnitySessionState::AwaitingHello);
 }
 
@@ -271,6 +304,10 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleDecodedFrame(const Protoc
 			}
 			return handleMovementRequest(frame.payload);
 		case ProtocolUnityOpcode::AttackRequest:
+			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
+				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
+			}
+			return handleAttackRequest(frame.payload);
 		case ProtocolUnityOpcode::PickupItemRequest:
 			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
 				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
@@ -381,6 +418,22 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleMovementRequest(std::span
 	const auto direction = reader.readByte();
 	reader.expectFullyConsumed();
 	return movementHandler(actorId, direction);
+}
+
+ProtocolUnitySessionAction ProtocolUnitySession::handleAttackRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "AttackRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!attackHandler) {
+		return reject("combat_unavailable", "ProtocolUnity combat is not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto targetId = reader.readU32();
+	reader.expectFullyConsumed();
+	return attackHandler(actorId, targetId);
 }
 
 ProtocolUnitySessionAction ProtocolUnitySession::handlePing(std::span<const uint8_t> payload) const {
@@ -589,6 +642,13 @@ void ProtocolUnity::onPlayerCreatureHealth(const std::shared_ptr<const Player> &
 	}
 
 	sendRawFrame(buildCreatureHealthFrame(creature->getID(), clampToU16(creature->getHealth()), clampToU16(creature->getMaxHealth())));
+	if (creature->getHealth() <= 0) {
+		if (deadActorIds.insert(creature->getID()).second) {
+			sendRawFrame(buildCreatureDeathFrame(creature->getID(), creature->getLastHitCreatureId()));
+		}
+	} else {
+		deadActorIds.erase(creature->getID());
+	}
 }
 
 void ProtocolUnity::onPlayerCreatureBecameVisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
@@ -614,6 +674,7 @@ void ProtocolUnity::onPlayerCreatureRemovedFromWorld(const std::shared_ptr<const
 		return;
 	}
 
+	deadActorIds.erase(creature->getID());
 	if (visibleActorIds.erase(creature->getID()) > 0) {
 		sendRawFrame(buildCreatureDespawnFrame(creature->getID(), "removed"));
 	}
@@ -657,6 +718,22 @@ void ProtocolUnity::onPlayerInventoryUpdated(const std::shared_ptr<const Player>
 	sendRawFrame(buildInventoryUpdateFrame(activePlayer->getID(), captureInventorySlotState(slotIndex, item)));
 }
 
+void ProtocolUnity::onPlayerCombatResult(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &target, int32_t damage, bool targetDied) {
+	if (!activePlayer || !viewer || !attacker || !target || viewer != activePlayer || attacker != activePlayer) {
+		return;
+	}
+
+	sendRawFrame(buildCombatResultFrame(
+		attacker->getID(),
+		target->getID(),
+		clampToI16(damage),
+		clampToU16(target->getHealth()),
+		targetDied,
+		true,
+		targetDied ? "defeated" : "hit"
+	));
+}
+
 void ProtocolUnity::processFrame(NetworkMessage &msg) {
 	try {
 		auto &activeSession = getSession();
@@ -685,6 +762,7 @@ void ProtocolUnity::sendRawFrame(std::span<const uint8_t> frameBytes) const {
 void ProtocolUnity::cleanupActivePlayer() {
 	pendingWorldBootstrap = false;
 	visibleActorIds.clear();
+	deadActorIds.clear();
 	visibleGroundItemIds.clear();
 	pendingMovement.reset();
 	nextGroundItemInstanceId = 1;
@@ -930,6 +1008,13 @@ std::vector<uint8_t> ProtocolUnity::buildCreatureHealthFrame(uint32_t actorId, u
 	return writer.finalize();
 }
 
+std::vector<uint8_t> ProtocolUnity::buildCreatureDeathFrame(uint32_t actorId, uint32_t killerActorId) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::CreatureDeath);
+	writer.writeU32(actorId);
+	writer.writeU32(killerActorId);
+	return writer.finalize();
+}
+
 std::vector<uint8_t> ProtocolUnity::buildCreatureDespawnFrame(uint32_t actorId, std::string_view reason) const {
 	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::CreatureDespawn);
 	writer.writeU32(actorId);
@@ -1014,6 +1099,18 @@ std::vector<uint8_t> ProtocolUnity::buildMovementResultFrame(uint32_t actorId, c
 	return writer.finalize();
 }
 
+std::vector<uint8_t> ProtocolUnity::buildCombatResultFrame(uint32_t attackerId, uint32_t targetId, int16_t damage, uint16_t targetHealthAfterHit, bool targetDied, bool attackAccepted, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::CombatResult);
+	writer.writeU32(attackerId);
+	writer.writeU32(targetId);
+	writer.writeI16(damage);
+	writer.writeU16(targetHealthAfterHit);
+	writer.writeByte(targetDied ? 1 : 0);
+	writer.writeByte(attackAccepted ? 1 : 0);
+	writer.writeString(reason);
+	return writer.finalize();
+}
+
 ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uint8_t direction) {
 	ProtocolUnitySessionAction action;
 	if (!activePlayer || activePlayer->isRemoved()) {
@@ -1044,6 +1141,52 @@ ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uin
 		.expectedToPosition = captureViewportPosition(getNextPosition(*canaryDirection, activePlayer->getPosition())),
 	};
 	g_game().playerMove(activePlayer->getID(), *canaryDirection);
+	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::attackTarget(uint32_t actorId, uint32_t targetId) {
+	ProtocolUnitySessionAction action;
+	if (!activePlayer || activePlayer->isRemoved()) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, 0, false, false, "player_unavailable"));
+		return action;
+	}
+
+	if (activePlayer->getID() != actorId) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, 0, false, false, "actor_mismatch"));
+		return action;
+	}
+
+	if (targetId == 0) {
+		g_game().playerSetAttackedCreature(activePlayer->getID(), 0);
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, 0, 0, 0, false, true, "target_cleared"));
+		return action;
+	}
+
+	const auto &target = g_game().getCreatureByID(targetId);
+	if (!target || target->isRemoved()) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, 0, false, false, "unknown_target"));
+		return action;
+	}
+
+	const auto targetHealth = clampToU16(target->getHealth());
+	const auto currentTarget = activePlayer->getAttackedCreature();
+	if (currentTarget && currentTarget->getID() == targetId && activePlayer->getLastAttack() > 0 && !activePlayer->hasExtraSwing()) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, targetHealth, false, false, "cooldown"));
+		return action;
+	}
+
+	const ReturnValue ret = Combat::canTargetCreature(activePlayer, target);
+	if (ret != RETURNVALUE_NOERROR) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, targetHealth, false, false, toProtocolUnityCombatReason(ret)));
+		return action;
+	}
+
+	g_game().playerSetAttackedCreature(activePlayer->getID(), targetId);
+	const auto updatedTarget = activePlayer->getAttackedCreature();
+	if (!updatedTarget || updatedTarget->getID() != targetId) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, targetHealth, false, false, "target_not_visible"));
+	}
+
 	return action;
 }
 
@@ -1270,6 +1413,9 @@ ProtocolUnitySession &ProtocolUnity::getSession() {
 			},
 			[this](uint32_t actorId, uint8_t direction) {
 				return moveActivePlayer(actorId, direction);
+			},
+			[this](uint32_t actorId, uint32_t targetId) {
+				return attackTarget(actorId, targetId);
 			}
 		);
 	}

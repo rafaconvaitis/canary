@@ -129,6 +129,7 @@ public:
 	using LoginHandler = std::function<ProtocolUnityLoginResponse(std::string_view accountDescriptor, std::string_view secret)>;
 	using EnterWorldHandler = std::function<ProtocolUnityEnterWorldResponse(uint32_t accountId, uint32_t characterId)>;
 	using MovementHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint8_t direction)>;
+	using AttackHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint32_t targetId)>;
 
 	ProtocolUnitySession(
 		const ProtocolUnityContract &initContract,
@@ -137,7 +138,8 @@ public:
 		uint8_t initSupportedCapabilities = 1,
 		LoginHandler initLoginHandler = {},
 		EnterWorldHandler initEnterWorldHandler = {},
-		MovementHandler initMovementHandler = {}
+		MovementHandler initMovementHandler = {},
+		AttackHandler initAttackHandler = {}
 	);
 
 	[[nodiscard]] ProtocolUnitySessionState getState() const;
@@ -155,6 +157,7 @@ private:
 	[[nodiscard]] ProtocolUnitySessionAction handleLoginRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleEnterWorldRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleMovementRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleAttackRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handlePing(std::span<const uint8_t> payload) const;
 	[[nodiscard]] ProtocolUnitySessionAction reject(std::string_view code, std::string_view detail, bool countViolation, bool closeConnection);
 	[[nodiscard]] std::vector<uint8_t> buildServerHelloFrame() const;
@@ -181,6 +184,7 @@ private:
 	LoginHandler loginHandler {};
 	EnterWorldHandler enterWorldHandler {};
 	MovementHandler movementHandler {};
+	AttackHandler attackHandler {};
 };
 
 class ProtocolUnity final : public Protocol, public PlayerProtocolObserver {
@@ -209,6 +213,7 @@ public:
 	void onPlayerTileItemUpdated(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) override;
 	void onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &position, const std::shared_ptr<Item> &item) override;
 	void onPlayerInventoryUpdated(const std::shared_ptr<const Player> &viewer, uint8_t slotIndex, const std::shared_ptr<Item> &item) override;
+	void onPlayerCombatResult(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &target, int32_t damage, bool targetDied) override;
 
 private:
 	struct PendingMovementIntent {
@@ -229,6 +234,7 @@ private:
 	[[nodiscard]] std::vector<uint8_t> buildCreatureSpawnFrame(const ProtocolUnityActorState &actor) const;
 	[[nodiscard]] std::vector<uint8_t> buildCreatureMoveFrame(uint32_t actorId, const ProtocolUnityWorldPosition &fromPosition, const ProtocolUnityWorldPosition &toPosition, uint8_t direction, bool isAuthoritativeCorrection) const;
 	[[nodiscard]] std::vector<uint8_t> buildCreatureHealthFrame(uint32_t actorId, uint16_t currentHealth, uint16_t maximumHealth) const;
+	[[nodiscard]] std::vector<uint8_t> buildCreatureDeathFrame(uint32_t actorId, uint32_t killerActorId) const;
 	[[nodiscard]] std::vector<uint8_t> buildCreatureDespawnFrame(uint32_t actorId, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildInventorySnapshotFrame(uint32_t actorId, std::span<const ProtocolUnityInventorySlotState> slots) const;
 	[[nodiscard]] std::vector<uint8_t> buildInventoryUpdateFrame(uint32_t actorId, const ProtocolUnityInventorySlotState &slot) const;
@@ -236,7 +242,9 @@ private:
 	[[nodiscard]] std::vector<uint8_t> buildItemRemoveFrame(uint32_t itemInstanceId, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildMapSnapshotFrame(int32_t width, int32_t height, int32_t floor, std::span<const ProtocolUnityTileState> tiles) const;
 	[[nodiscard]] std::vector<uint8_t> buildMovementResultFrame(uint32_t actorId, const ProtocolUnityWorldPosition &position, bool accepted, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildCombatResultFrame(uint32_t attackerId, uint32_t targetId, int16_t damage, uint16_t targetHealthAfterHit, bool targetDied, bool attackAccepted, std::string_view reason) const;
 	[[nodiscard]] ProtocolUnitySessionAction moveActivePlayer(uint32_t actorId, uint8_t direction);
+	[[nodiscard]] ProtocolUnitySessionAction attackTarget(uint32_t actorId, uint32_t targetId);
 	[[nodiscard]] ProtocolUnityActorState captureActorState(const std::shared_ptr<Creature> &creature) const;
 	[[nodiscard]] std::vector<ProtocolUnityInventorySlotState> captureInventorySnapshot() const;
 	[[nodiscard]] ProtocolUnityInventorySlotState captureInventorySlotState(uint8_t slotIndex, const std::shared_ptr<Item> &item) const;
@@ -253,6 +261,7 @@ private:
 	std::shared_ptr<Player> activePlayer = nullptr;
 	bool pendingWorldBootstrap = false;
 	std::unordered_set<uint32_t> visibleActorIds {};
+	std::unordered_set<uint32_t> deadActorIds {};
 	std::unordered_map<const Item*, uint32_t> visibleGroundItemIds {};
 	ProtocolUnityWorldPosition snapshotOrigin {};
 	std::optional<PendingMovementIntent> pendingMovement {};

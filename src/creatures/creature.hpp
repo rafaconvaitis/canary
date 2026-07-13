@@ -694,6 +694,9 @@ public:
 	CountMap getDamageMap() const {
 		return damageMap;
 	}
+	uint32_t getLastHitCreatureId() const {
+		return lastHitCreatureId;
+	}
 	void setWheelOfDestinyDrainBodyDebuff(uint8_t value) {
 		wheelOfDestinyDrainBodyDebuff = value;
 	}

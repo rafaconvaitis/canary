@@ -6432,6 +6432,10 @@ void Player::onPlacedCreature() {
 void Player::onAttackedCreatureDrainHealth(const std::shared_ptr<Creature> &target, int32_t points) {
 	Creature::onAttackedCreatureDrainHealth(target, points);
 
+	if (const auto &observer = protocolObserver.lock()) {
+		observer->onPlayerCombatResult(getPlayer(), getPlayer(), target, points, target && target->getHealth() <= 0);
+	}
+
 	if (target) {
 		if (m_party && !Combat::isPlayerCombat(target)) {
 			const auto &tmpMonster = target->getMonster();

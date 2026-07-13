@@ -61,10 +61,11 @@ namespace {
 	[[nodiscard]] ProtocolUnitySession makeSession(
 		ProtocolUnitySession::LoginHandler loginHandler,
 		ProtocolUnitySession::EnterWorldHandler enterWorldHandler = {},
-		ProtocolUnitySession::MovementHandler movementHandler = {}
+		ProtocolUnitySession::MovementHandler movementHandler = {},
+		ProtocolUnitySession::AttackHandler attackHandler = {}
 	) {
 		const auto &contract = getProtocolUnityContract();
-		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, 1, std::move(loginHandler), std::move(enterWorldHandler), std::move(movementHandler));
+		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, 1, std::move(loginHandler), std::move(enterWorldHandler), std::move(movementHandler), std::move(attackHandler));
 	}
 
 	[[nodiscard]] std::vector<uint8_t> buildLoginRequestFrame(std::string_view accountDescriptor, std::string_view secret) {
@@ -84,6 +85,13 @@ namespace {
 		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::MovementRequest);
 		writer.writeU32(actorId);
 		writer.writeByte(direction);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildAttackRequestFrame(uint32_t actorId, uint32_t targetId) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::AttackRequest);
+		writer.writeU32(actorId);
+		writer.writeU32(targetId);
 		return writer.finalize();
 	}
 
@@ -375,6 +383,95 @@ TEST(ProtocolUnitySessionTest, MovementRequestInWorldDispatchesMovementHandler) 
 	EXPECT_EQ(7, reader.readI32());
 	EXPECT_EQ(1, reader.readByte());
 	EXPECT_EQ("", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, AttackRequestBeforeWorldEntryReturnsStructuredError) {
+	auto session = makeSession();
+	const auto helloFrame = ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex);
+	const auto attackFrame = buildAttackRequestFrame(1100, 2200);
+
+	(void)session.handleFrame(helloFrame);
+	const auto action = session.handleFrame(attackFrame);
+
+	ASSERT_EQ(ProtocolUnitySessionState::AwaitingAuthentication, session.getState());
+	ASSERT_EQ(1U, session.getViolationCount());
+	ASSERT_FALSE(action.closeConnection);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::ErrorMessage, response.opcode);
+
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ("invalid_state", reader.readString());
+	EXPECT_EQ("AttackRequest is only valid after world entry succeeds.", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, AttackRequestInWorldDispatchesAttackHandler) {
+	auto session = makeSession(
+		[](std::string_view, std::string_view) {
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.message = "Login accepted.";
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+			};
+			return response;
+		},
+		[](uint32_t, uint32_t) {
+			ProtocolUnityEnterWorldResponse response;
+			response.success = true;
+			response.selectionAccepted = true;
+			response.message = "Entered world.";
+			response.actorId = 1100;
+			response.spawnPosition = { .x = 8, .y = 6, .floor = 7 };
+			return response;
+		},
+		{},
+		[](uint32_t actorId, uint32_t targetId) {
+			EXPECT_EQ(1100U, actorId);
+			EXPECT_EQ(2200U, targetId);
+
+			ProtocolUnitySessionAction action;
+			ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::CombatResult);
+			writer.writeU32(actorId);
+			writer.writeU32(targetId);
+			writer.writeI16(12);
+			writer.writeU16(18);
+			writer.writeByte(0);
+			writer.writeByte(1);
+			writer.writeString("hit");
+			action.outboundFrames.emplace_back(writer.finalize());
+			return action;
+		}
+	);
+	const auto helloFrame = ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex);
+	const auto loginFrame = buildLoginRequestFrame("dev.alpha", "plain-secret");
+	const auto enterWorldFrame = buildEnterWorldRequestFrame(11);
+	const auto attackFrame = buildAttackRequestFrame(1100, 2200);
+
+	(void)session.handleFrame(helloFrame);
+	(void)session.handleFrame(loginFrame);
+	(void)session.handleFrame(enterWorldFrame);
+	const auto action = session.handleFrame(attackFrame);
+
+	ASSERT_EQ(ProtocolUnitySessionState::InWorld, session.getState());
+	ASSERT_FALSE(action.closeConnection);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::CombatResult, response.opcode);
+
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ(1100U, reader.readU32());
+	EXPECT_EQ(2200U, reader.readU32());
+	EXPECT_EQ(12, reader.readI16());
+	EXPECT_EQ(18, reader.readU16());
+	EXPECT_EQ(0, reader.readByte());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ("hit", reader.readString());
 	EXPECT_NO_THROW(reader.expectFullyConsumed());
 }
 
