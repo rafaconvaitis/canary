@@ -31,6 +31,7 @@
 #include "server/network/message/outputmessage.hpp"
 #include "server/network/protocol/protocolgame.hpp"
 #include "server/network/protocol/transport_codec.hpp"
+#include "utils/tools.hpp"
 
 #ifndef USE_PRECOMPILED_HEADERS
 	#include <algorithm>
@@ -113,6 +114,10 @@ namespace {
 			default:
 				return std::nullopt;
 		}
+	}
+
+	[[nodiscard]] bool isSameProtocolUnityPosition(const ProtocolUnityWorldPosition &lhs, const ProtocolUnityWorldPosition &rhs) {
+		return lhs.x == rhs.x && lhs.y == rhs.y && lhs.floor == rhs.floor;
 	}
 
 	template <typename T>
@@ -509,7 +514,17 @@ void ProtocolUnity::onPlayerCancelWalk(const std::shared_ptr<const Player> &view
 		return;
 	}
 
-	sendRawFrame(buildMovementResultFrame(pendingMovement->actorId, captureViewportPosition(activePlayer->getPosition()), false, "walk_cancelled"));
+	const auto actualPosition = captureViewportPosition(activePlayer->getPosition());
+	sendRawFrame(buildMovementResultFrame(pendingMovement->actorId, actualPosition, false, "walk_cancelled"));
+	if (!isSameProtocolUnityPosition(pendingMovement->expectedToPosition, actualPosition)) {
+		sendRawFrame(buildCreatureMoveFrame(
+			pendingMovement->actorId,
+			pendingMovement->expectedToPosition,
+			actualPosition,
+			toProtocolUnityDirection(activePlayer->getDirection()),
+			true
+		));
+	}
 	pendingMovement.reset();
 }
 
@@ -532,13 +547,17 @@ void ProtocolUnity::onPlayerCreatureMove(const std::shared_ptr<const Player> &vi
 	const auto fromPosition = captureViewportPosition(oldPos);
 	const auto toPosition = captureViewportPosition(newPos);
 	const auto direction = toProtocolUnityDirection(creature->getDirection());
+	bool isAuthoritativeCorrection = false;
 
 	if (creature == activePlayer && pendingMovement.has_value() && pendingMovement->actorId == creature->getID()) {
+		isAuthoritativeCorrection =
+			!isSameProtocolUnityPosition(pendingMovement->requestedFromPosition, fromPosition) ||
+			!isSameProtocolUnityPosition(pendingMovement->expectedToPosition, toPosition);
 		sendRawFrame(buildMovementResultFrame(creature->getID(), toPosition, true, ""));
 		pendingMovement.reset();
 	}
 
-	sendRawFrame(buildCreatureMoveFrame(creature->getID(), fromPosition, toPosition, direction, false));
+	sendRawFrame(buildCreatureMoveFrame(creature->getID(), fromPosition, toPosition, direction, isAuthoritativeCorrection));
 	if (creature == activePlayer) {
 		syncVisibleGroundItems();
 	}
@@ -587,6 +606,16 @@ void ProtocolUnity::onPlayerCreatureBecameInvisible(const std::shared_ptr<const 
 
 	if (visibleActorIds.erase(creature->getID()) > 0) {
 		sendRawFrame(buildCreatureDespawnFrame(creature->getID(), creature->isRemoved() ? "removed" : "out_of_view"));
+	}
+}
+
+void ProtocolUnity::onPlayerCreatureRemovedFromWorld(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
+	if (!activePlayer || !viewer || !creature || viewer != activePlayer || creature == activePlayer) {
+		return;
+	}
+
+	if (visibleActorIds.erase(creature->getID()) > 0) {
+		sendRawFrame(buildCreatureDespawnFrame(creature->getID(), "removed"));
 	}
 }
 
@@ -772,6 +801,7 @@ ProtocolUnityEnterWorldResponse ProtocolUnity::enterWorld(uint32_t accountId, ui
 		return response;
 	}
 
+	player->setLastLoginSaved(std::max<time_t>(time(nullptr), player->getLastLoginSaved() + 1));
 	player->setLoginProtection(g_configManager().getNumber(LOGIN_PROTECTION_TIME));
 	player->setProtocolObserver(getThis());
 
@@ -1010,6 +1040,8 @@ ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uin
 	pendingMovement = PendingMovementIntent {
 		.actorId = actorId,
 		.direction = direction,
+		.requestedFromPosition = captureViewportPosition(activePlayer->getPosition()),
+		.expectedToPosition = captureViewportPosition(getNextPosition(*canaryDirection, activePlayer->getPosition())),
 	};
 	g_game().playerMove(activePlayer->getID(), *canaryDirection);
 	return action;

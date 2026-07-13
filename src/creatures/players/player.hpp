@@ -628,6 +628,10 @@ public:
 		return lastLoginSaved;
 	}
 
+	void setLastLoginSaved(time_t value) {
+		lastLoginSaved = value;
+	}
+
 	time_t getLastLogout() const {
 		return lastLogout;
 	}

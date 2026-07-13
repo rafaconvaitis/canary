@@ -204,6 +204,7 @@ public:
 	void onPlayerCreatureHealth(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
 	void onPlayerCreatureBecameVisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
 	void onPlayerCreatureBecameInvisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
+	void onPlayerCreatureRemovedFromWorld(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
 	void onPlayerTileItemAdded(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) override;
 	void onPlayerTileItemUpdated(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) override;
 	void onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &position, const std::shared_ptr<Item> &item) override;
@@ -213,6 +214,8 @@ private:
 	struct PendingMovementIntent {
 		uint32_t actorId = 0;
 		uint8_t direction = 0;
+		ProtocolUnityWorldPosition requestedFromPosition {};
+		ProtocolUnityWorldPosition expectedToPosition {};
 	};
 
 	[[nodiscard]] std::shared_ptr<ProtocolUnity> getThis();

@@ -12109,6 +12109,12 @@ void Player::onCreatureAppear(const std::shared_ptr<Creature> &creature, bool is
 void Player::onRemoveCreature(const std::shared_ptr<Creature> &creature, bool isLogout) {
 	Creature::onRemoveCreature(creature, isLogout);
 
+	if (const auto &thisPlayer = getPlayer(); creature && creature != thisPlayer) {
+		if (const auto &observer = protocolObserver.lock()) {
+			observer->onPlayerCreatureRemovedFromWorld(thisPlayer, creature);
+		}
+	}
+
 	if (const auto &player = getPlayer(); player == creature) {
 		if (isLogout) {
 			onDeEquipInventory();
