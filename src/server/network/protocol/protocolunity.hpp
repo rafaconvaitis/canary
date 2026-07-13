@@ -25,6 +25,7 @@ struct Position;
 	#include <memory>
 	#include <span>
 	#include <string>
+	#include <unordered_map>
 	#include <unordered_set>
 	#include <vector>
 #endif
@@ -108,6 +109,14 @@ struct ProtocolUnityInventorySlotState {
 	std::string name {};
 	uint16_t quantity = 0;
 	uint16_t stackLimit = 0;
+};
+
+struct ProtocolUnityGroundItemState {
+	uint32_t itemInstanceId = 0;
+	uint16_t itemTypeId = 0;
+	std::string name {};
+	ProtocolUnityWorldPosition position {};
+	uint16_t quantity = 0;
 };
 
 struct ProtocolUnitySessionAction {
@@ -195,6 +204,10 @@ public:
 	void onPlayerCreatureHealth(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
 	void onPlayerCreatureBecameVisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
 	void onPlayerCreatureBecameInvisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
+	void onPlayerTileItemAdded(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) override;
+	void onPlayerTileItemUpdated(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) override;
+	void onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &position, const std::shared_ptr<Item> &item) override;
+	void onPlayerInventoryUpdated(const std::shared_ptr<const Player> &viewer, uint8_t slotIndex, const std::shared_ptr<Item> &item) override;
 
 private:
 	struct PendingMovementIntent {
@@ -215,13 +228,20 @@ private:
 	[[nodiscard]] std::vector<uint8_t> buildCreatureHealthFrame(uint32_t actorId, uint16_t currentHealth, uint16_t maximumHealth) const;
 	[[nodiscard]] std::vector<uint8_t> buildCreatureDespawnFrame(uint32_t actorId, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildInventorySnapshotFrame(uint32_t actorId, std::span<const ProtocolUnityInventorySlotState> slots) const;
+	[[nodiscard]] std::vector<uint8_t> buildInventoryUpdateFrame(uint32_t actorId, const ProtocolUnityInventorySlotState &slot) const;
+	[[nodiscard]] std::vector<uint8_t> buildItemSpawnFrame(const ProtocolUnityGroundItemState &item) const;
+	[[nodiscard]] std::vector<uint8_t> buildItemRemoveFrame(uint32_t itemInstanceId, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildMapSnapshotFrame(int32_t width, int32_t height, int32_t floor, std::span<const ProtocolUnityTileState> tiles) const;
 	[[nodiscard]] std::vector<uint8_t> buildMovementResultFrame(uint32_t actorId, const ProtocolUnityWorldPosition &position, bool accepted, std::string_view reason) const;
 	[[nodiscard]] ProtocolUnitySessionAction moveActivePlayer(uint32_t actorId, uint8_t direction);
 	[[nodiscard]] ProtocolUnityActorState captureActorState(const std::shared_ptr<Creature> &creature) const;
 	[[nodiscard]] std::vector<ProtocolUnityInventorySlotState> captureInventorySnapshot() const;
+	[[nodiscard]] ProtocolUnityInventorySlotState captureInventorySlotState(uint8_t slotIndex, const std::shared_ptr<Item> &item) const;
+	[[nodiscard]] ProtocolUnityGroundItemState captureGroundItemState(const std::shared_ptr<Item> &item, const Position &position);
 	[[nodiscard]] std::vector<ProtocolUnityTileState> captureMapSnapshotTiles(int32_t &width, int32_t &height, int32_t &floor);
 	[[nodiscard]] ProtocolUnityWorldPosition captureViewportPosition(const Position &position) const;
+	[[nodiscard]] uint32_t ensureGroundItemInstanceId(const std::shared_ptr<Item> &item);
+	void syncVisibleGroundItems();
 	void sendVisibleCreatureSpawn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature);
 	[[nodiscard]] ProtocolUnitySession &getSession();
 	[[nodiscard]] static const ProtocolUnityContract &getContract();
@@ -230,6 +250,8 @@ private:
 	std::shared_ptr<Player> activePlayer = nullptr;
 	bool pendingWorldBootstrap = false;
 	std::unordered_set<uint32_t> visibleActorIds {};
+	std::unordered_map<const Item*, uint32_t> visibleGroundItemIds {};
 	ProtocolUnityWorldPosition snapshotOrigin {};
 	std::optional<PendingMovementIntent> pendingMovement {};
+	uint32_t nextGroundItemInstanceId = 1;
 };

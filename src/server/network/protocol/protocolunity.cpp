@@ -539,6 +539,9 @@ void ProtocolUnity::onPlayerCreatureMove(const std::shared_ptr<const Player> &vi
 	}
 
 	sendRawFrame(buildCreatureMoveFrame(creature->getID(), fromPosition, toPosition, direction, false));
+	if (creature == activePlayer) {
+		syncVisibleGroundItems();
+	}
 }
 
 void ProtocolUnity::onPlayerCreatureTurn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
@@ -587,6 +590,44 @@ void ProtocolUnity::onPlayerCreatureBecameInvisible(const std::shared_ptr<const 
 	}
 }
 
+void ProtocolUnity::onPlayerTileItemAdded(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &, const Position &position, const std::shared_ptr<Item> &item) {
+	if (!activePlayer || !viewer || viewer != activePlayer || !item || item->isRemoved()) {
+		return;
+	}
+
+	sendRawFrame(buildItemSpawnFrame(captureGroundItemState(item, position)));
+}
+
+void ProtocolUnity::onPlayerTileItemUpdated(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &, const Position &position, const std::shared_ptr<Item> &item) {
+	if (!activePlayer || !viewer || viewer != activePlayer || !item || item->isRemoved()) {
+		return;
+	}
+
+	sendRawFrame(buildItemSpawnFrame(captureGroundItemState(item, position)));
+}
+
+void ProtocolUnity::onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &, const std::shared_ptr<Item> &item) {
+	if (!activePlayer || !viewer || viewer != activePlayer || !item) {
+		return;
+	}
+
+	const auto iterator = visibleGroundItemIds.find(item.get());
+	if (iterator == visibleGroundItemIds.end()) {
+		return;
+	}
+
+	sendRawFrame(buildItemRemoveFrame(iterator->second, "removed"));
+	visibleGroundItemIds.erase(iterator);
+}
+
+void ProtocolUnity::onPlayerInventoryUpdated(const std::shared_ptr<const Player> &viewer, uint8_t slotIndex, const std::shared_ptr<Item> &item) {
+	if (!activePlayer || !viewer || viewer != activePlayer) {
+		return;
+	}
+
+	sendRawFrame(buildInventoryUpdateFrame(activePlayer->getID(), captureInventorySlotState(slotIndex, item)));
+}
+
 void ProtocolUnity::processFrame(NetworkMessage &msg) {
 	try {
 		auto &activeSession = getSession();
@@ -615,7 +656,9 @@ void ProtocolUnity::sendRawFrame(std::span<const uint8_t> frameBytes) const {
 void ProtocolUnity::cleanupActivePlayer() {
 	pendingWorldBootstrap = false;
 	visibleActorIds.clear();
+	visibleGroundItemIds.clear();
 	pendingMovement.reset();
+	nextGroundItemInstanceId = 1;
 
 	if (!activePlayer) {
 		return;
@@ -784,6 +827,36 @@ std::vector<std::vector<uint8_t>> ProtocolUnity::buildPendingWorldBootstrapFrame
 	}
 
 	visibleActorIds = std::move(nextVisibleActorIds);
+
+	visibleGroundItemIds.clear();
+	for (int32_t localY = 0; localY < height; ++localY) {
+		for (int32_t localX = 0; localX < width; ++localX) {
+			const auto absoluteX = snapshotOrigin.x + localX;
+			const auto absoluteY = snapshotOrigin.y + localY;
+			if (absoluteX < 0 || absoluteY < 0 || absoluteX > std::numeric_limits<uint16_t>::max() || absoluteY > std::numeric_limits<uint16_t>::max()) {
+				continue;
+			}
+
+			const auto tile = g_game().map.getTile(static_cast<uint16_t>(absoluteX), static_cast<uint16_t>(absoluteY), static_cast<uint8_t>(floor));
+			if (!tile || !activePlayer->canSee(tile->getPosition())) {
+				continue;
+			}
+
+			const auto &items = tile->getItemList();
+			if (!items) {
+				continue;
+			}
+
+			for (const auto &item : *items) {
+				if (!item || item->isRemoved()) {
+					continue;
+				}
+
+				frames.emplace_back(buildItemSpawnFrame(captureGroundItemState(item, tile->getPosition())));
+			}
+		}
+	}
+
 	return frames;
 }
 
@@ -848,6 +921,36 @@ std::vector<uint8_t> ProtocolUnity::buildInventorySnapshotFrame(uint32_t actorId
 		writer.writeU16(slot.stackLimit);
 	}
 
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildInventoryUpdateFrame(uint32_t actorId, const ProtocolUnityInventorySlotState &slot) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::InventoryUpdate);
+	writer.writeU32(actorId);
+	writer.writeByte(slot.slotIndex);
+	writer.writeU16(slot.itemTypeId);
+	writer.writeString(slot.name);
+	writer.writeU16(slot.quantity);
+	writer.writeU16(slot.stackLimit);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildItemSpawnFrame(const ProtocolUnityGroundItemState &item) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::ItemSpawn);
+	writer.writeU32(item.itemInstanceId);
+	writer.writeU16(item.itemTypeId);
+	writer.writeString(item.name);
+	writer.writeI32(item.position.x);
+	writer.writeI32(item.position.y);
+	writer.writeI32(item.position.floor);
+	writer.writeU16(item.quantity);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildItemRemoveFrame(uint32_t itemInstanceId, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::ItemRemove);
+	writer.writeU32(itemInstanceId);
+	writer.writeString(reason);
 	return writer.finalize();
 }
 
@@ -951,16 +1054,38 @@ std::vector<ProtocolUnityInventorySlotState> ProtocolUnity::captureInventorySnap
 			continue;
 		}
 
-		slots.push_back(ProtocolUnityInventorySlotState {
-			.slotIndex = slot,
-			.itemTypeId = item->getID(),
-			.name = item->getName(),
-			.quantity = static_cast<uint16_t>(item->isStackable() ? item->getItemCount() : 1),
-			.stackLimit = item->getStackSize(),
-		});
+		slots.push_back(captureInventorySlotState(slot, item));
 	}
 
 	return slots;
+}
+
+ProtocolUnityInventorySlotState ProtocolUnity::captureInventorySlotState(uint8_t slotIndex, const std::shared_ptr<Item> &item) const {
+	ProtocolUnityInventorySlotState slot;
+	slot.slotIndex = slotIndex;
+	if (!item) {
+		return slot;
+	}
+
+	slot.itemTypeId = item->getID();
+	slot.name = item->getName();
+	slot.quantity = static_cast<uint16_t>(item->isStackable() ? item->getItemCount() : 1);
+	slot.stackLimit = item->getStackSize();
+	return slot;
+}
+
+ProtocolUnityGroundItemState ProtocolUnity::captureGroundItemState(const std::shared_ptr<Item> &item, const Position &position) {
+	ProtocolUnityGroundItemState state;
+	if (!item) {
+		return state;
+	}
+
+	state.itemInstanceId = ensureGroundItemInstanceId(item);
+	state.itemTypeId = item->getID();
+	state.name = item->getName();
+	state.position = captureViewportPosition(position);
+	state.quantity = static_cast<uint16_t>(item->isStackable() ? item->getItemCount() : 1);
+	return state;
 }
 
 std::vector<ProtocolUnityTileState> ProtocolUnity::captureMapSnapshotTiles(int32_t &width, int32_t &height, int32_t &floor) {
@@ -1013,6 +1138,73 @@ ProtocolUnityWorldPosition ProtocolUnity::captureViewportPosition(const Position
 		.y = static_cast<int32_t>(position.y) - snapshotOrigin.y,
 		.floor = static_cast<int32_t>(position.z),
 	};
+}
+
+uint32_t ProtocolUnity::ensureGroundItemInstanceId(const std::shared_ptr<Item> &item) {
+	if (!item) {
+		return 0;
+	}
+
+	const auto iterator = visibleGroundItemIds.find(item.get());
+	if (iterator != visibleGroundItemIds.end()) {
+		return iterator->second;
+	}
+
+	const auto itemInstanceId = nextGroundItemInstanceId++;
+	visibleGroundItemIds.emplace(item.get(), itemInstanceId);
+	return itemInstanceId;
+}
+
+void ProtocolUnity::syncVisibleGroundItems() {
+	if (!activePlayer || activePlayer->isRemoved()) {
+		return;
+	}
+
+	std::unordered_set<const Item*> nextVisibleGroundItems;
+	const auto floor = activePlayer->getPosition().z;
+	const auto minX = static_cast<int32_t>(activePlayer->getPosition().x) - MAP_MAX_CLIENT_VIEW_PORT_X;
+	const auto maxX = static_cast<int32_t>(activePlayer->getPosition().x) + MAP_MAX_CLIENT_VIEW_PORT_X;
+	const auto minY = static_cast<int32_t>(activePlayer->getPosition().y) - MAP_MAX_CLIENT_VIEW_PORT_Y;
+	const auto maxY = static_cast<int32_t>(activePlayer->getPosition().y) + MAP_MAX_CLIENT_VIEW_PORT_Y;
+
+	for (int32_t absoluteY = minY; absoluteY <= maxY; ++absoluteY) {
+		for (int32_t absoluteX = minX; absoluteX <= maxX; ++absoluteX) {
+			if (absoluteX < 0 || absoluteY < 0 || absoluteX > std::numeric_limits<uint16_t>::max() || absoluteY > std::numeric_limits<uint16_t>::max()) {
+				continue;
+			}
+
+			const auto tile = g_game().map.getTile(static_cast<uint16_t>(absoluteX), static_cast<uint16_t>(absoluteY), floor);
+			if (!tile || !activePlayer->canSee(tile->getPosition())) {
+				continue;
+			}
+
+			const auto &items = tile->getItemList();
+			if (!items) {
+				continue;
+			}
+
+			for (const auto &item : *items) {
+				if (!item || item->isRemoved()) {
+					continue;
+				}
+
+				nextVisibleGroundItems.insert(item.get());
+				if (!visibleGroundItemIds.contains(item.get())) {
+					sendRawFrame(buildItemSpawnFrame(captureGroundItemState(item, tile->getPosition())));
+				}
+			}
+		}
+	}
+
+	for (auto iterator = visibleGroundItemIds.begin(); iterator != visibleGroundItemIds.end();) {
+		if (nextVisibleGroundItems.contains(iterator->first)) {
+			++iterator;
+			continue;
+		}
+
+		sendRawFrame(buildItemRemoveFrame(iterator->second, "out_of_view"));
+		iterator = visibleGroundItemIds.erase(iterator);
+	}
 }
 
 void ProtocolUnity::sendVisibleCreatureSpawn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {

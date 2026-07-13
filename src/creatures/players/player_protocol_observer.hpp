@@ -16,6 +16,8 @@
 
 class Player;
 class Creature;
+class Item;
+class Tile;
 struct Position;
 
 class PlayerProtocolObserver {
@@ -29,4 +31,8 @@ public:
 	virtual void onPlayerCreatureHealth(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) { }
 	virtual void onPlayerCreatureBecameVisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) { }
 	virtual void onPlayerCreatureBecameInvisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) { }
+	virtual void onPlayerTileItemAdded(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) { }
+	virtual void onPlayerTileItemUpdated(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &tile, const Position &position, const std::shared_ptr<Item> &item) { }
+	virtual void onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &position, const std::shared_ptr<Item> &item) { }
+	virtual void onPlayerInventoryUpdated(const std::shared_ptr<const Player> &viewer, uint8_t slotIndex, const std::shared_ptr<Item> &item) { }
 };

@@ -6924,6 +6924,10 @@ bool Player::canExiva(const std::string &spellParam) const {
 // send methods
 
 void Player::sendAddTileItem(const std::shared_ptr<Tile> &itemTile, const Position &pos, const std::shared_ptr<Item> &item) {
+	if (const auto observer = protocolObserver.lock()) {
+		observer->onPlayerTileItemAdded(getPlayer(), itemTile, pos, item);
+	}
+
 	if (client) {
 		int32_t stackpos = itemTile->getStackposOfItem(static_self_cast<Player>(), item);
 		if (stackpos != -1) {
@@ -6933,6 +6937,10 @@ void Player::sendAddTileItem(const std::shared_ptr<Tile> &itemTile, const Positi
 }
 
 void Player::sendUpdateTileItem(const std::shared_ptr<Tile> &updateTile, const Position &pos, const std::shared_ptr<Item> &item) {
+	if (const auto observer = protocolObserver.lock()) {
+		observer->onPlayerTileItemUpdated(getPlayer(), updateTile, pos, item);
+	}
+
 	if (client) {
 		int32_t stackpos = updateTile->getStackposOfItem(static_self_cast<Player>(), item);
 		if (stackpos != -1) {
@@ -9083,6 +9091,10 @@ void Player::sendCoinBalance() const {
 }
 
 void Player::sendInventoryItem(Slots_t slot, const std::shared_ptr<Item> &item) const {
+	if (const auto observer = protocolObserver.lock()) {
+		observer->onPlayerInventoryUpdated(getPlayer(), static_cast<uint8_t>(slot), item);
+	}
+
 	if (client) {
 		client->sendInventoryItem(slot, item);
 	}
@@ -11979,6 +11991,10 @@ void Player::onUpdateTileItem(const std::shared_ptr<Tile> &updateTile, const Pos
 
 void Player::onRemoveTileItem(const std::shared_ptr<Tile> &fromTile, const Position &pos, const ItemType &iType, const std::shared_ptr<Item> &item) {
 	Creature::onRemoveTileItem(fromTile, pos, iType, item);
+
+	if (const auto observer = protocolObserver.lock()) {
+		observer->onPlayerTileItemRemoved(getPlayer(), pos, item);
+	}
 
 	if (tradeState != TRADE_TRANSFER) {
 		checkTradeState(item);
