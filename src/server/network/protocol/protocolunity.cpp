@@ -481,6 +481,10 @@ ProtocolUnity::ProtocolUnity(const Connection_ptr &initConnection) :
 	}
 }
 
+std::shared_ptr<ProtocolUnity> ProtocolUnity::getThis() {
+	return std::static_pointer_cast<ProtocolUnity>(shared_from_this());
+}
+
 void ProtocolUnity::onConnectionAccepted() {
 	if (const auto connection = getConnection()) {
 		connection->setTransportCodec(TransportCodecs::protocolUnity(), InitialTransportState::ResolvedFromPrelude);
@@ -498,6 +502,89 @@ void ProtocolUnity::parsePacket(NetworkMessage &msg) {
 void ProtocolUnity::release() {
 	cleanupActivePlayer();
 	Protocol::release();
+}
+
+void ProtocolUnity::onPlayerCancelWalk(const std::shared_ptr<const Player> &viewer) {
+	if (!activePlayer || !viewer || viewer != activePlayer || !pendingMovement.has_value()) {
+		return;
+	}
+
+	sendRawFrame(buildMovementResultFrame(pendingMovement->actorId, captureViewportPosition(activePlayer->getPosition()), false, "walk_cancelled"));
+	pendingMovement.reset();
+}
+
+void ProtocolUnity::onPlayerCreatureAppear(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature, const Position &, bool) {
+	sendVisibleCreatureSpawn(viewer, creature);
+}
+
+void ProtocolUnity::onPlayerCreatureMove(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t, const Position &oldPos, int32_t, bool) {
+	if (!activePlayer || !viewer || !creature || viewer != activePlayer) {
+		return;
+	}
+
+	if (creature != activePlayer) {
+		sendVisibleCreatureSpawn(viewer, creature);
+		if (!visibleActorIds.contains(creature->getID())) {
+			return;
+		}
+	}
+
+	const auto fromPosition = captureViewportPosition(oldPos);
+	const auto toPosition = captureViewportPosition(newPos);
+	const auto direction = toProtocolUnityDirection(creature->getDirection());
+
+	if (creature == activePlayer && pendingMovement.has_value() && pendingMovement->actorId == creature->getID()) {
+		sendRawFrame(buildMovementResultFrame(creature->getID(), toPosition, true, ""));
+		pendingMovement.reset();
+	}
+
+	sendRawFrame(buildCreatureMoveFrame(creature->getID(), fromPosition, toPosition, direction, false));
+}
+
+void ProtocolUnity::onPlayerCreatureTurn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
+	if (!activePlayer || !viewer || !creature || viewer != activePlayer) {
+		return;
+	}
+
+	if (creature != activePlayer) {
+		sendVisibleCreatureSpawn(viewer, creature);
+		if (!visibleActorIds.contains(creature->getID())) {
+			return;
+		}
+	}
+
+	const auto position = captureViewportPosition(creature->getPosition());
+	sendRawFrame(buildCreatureMoveFrame(creature->getID(), position, position, toProtocolUnityDirection(creature->getDirection()), false));
+}
+
+void ProtocolUnity::onPlayerCreatureHealth(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
+	if (!activePlayer || !viewer || !creature || viewer != activePlayer) {
+		return;
+	}
+
+	if (creature != activePlayer && !visibleActorIds.contains(creature->getID())) {
+		return;
+	}
+
+	sendRawFrame(buildCreatureHealthFrame(creature->getID(), clampToU16(creature->getHealth()), clampToU16(creature->getMaxHealth())));
+}
+
+void ProtocolUnity::onPlayerCreatureBecameVisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
+	sendVisibleCreatureSpawn(viewer, creature);
+}
+
+void ProtocolUnity::onPlayerCreatureBecameInvisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
+	if (!activePlayer || !viewer || !creature || viewer != activePlayer || creature == activePlayer) {
+		return;
+	}
+
+	if (!creature->isRemoved() && viewer->canSeeCreature(creature)) {
+		return;
+	}
+
+	if (visibleActorIds.erase(creature->getID()) > 0) {
+		sendRawFrame(buildCreatureDespawnFrame(creature->getID(), creature->isRemoved() ? "removed" : "out_of_view"));
+	}
 }
 
 void ProtocolUnity::processFrame(NetworkMessage &msg) {
@@ -528,10 +615,13 @@ void ProtocolUnity::sendRawFrame(std::span<const uint8_t> frameBytes) const {
 void ProtocolUnity::cleanupActivePlayer() {
 	pendingWorldBootstrap = false;
 	visibleActorIds.clear();
+	pendingMovement.reset();
 
 	if (!activePlayer) {
 		return;
 	}
+
+	activePlayer->clearProtocolObserver();
 
 	if (!activePlayer->isRemoved()) {
 		g_game().removeCreature(activePlayer, true);
@@ -640,6 +730,7 @@ ProtocolUnityEnterWorldResponse ProtocolUnity::enterWorld(uint32_t accountId, ui
 	}
 
 	player->setLoginProtection(g_configManager().getNumber(LOGIN_PROTECTION_TIME));
+	player->setProtocolObserver(getThis());
 
 	activePlayer = player;
 	pendingWorldBootstrap = true;
@@ -711,6 +802,28 @@ std::vector<uint8_t> ProtocolUnity::buildCreatureSpawnFrame(const ProtocolUnityA
 	writer.writeU16(actor.maxMana);
 	writer.writeByte(static_cast<uint8_t>(actor.disposition));
 	writer.writeByte(actor.isDead ? 1 : 0);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildCreatureMoveFrame(uint32_t actorId, const ProtocolUnityWorldPosition &fromPosition, const ProtocolUnityWorldPosition &toPosition, uint8_t direction, bool isAuthoritativeCorrection) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::CreatureMove);
+	writer.writeU32(actorId);
+	writer.writeI32(fromPosition.x);
+	writer.writeI32(fromPosition.y);
+	writer.writeI32(fromPosition.floor);
+	writer.writeI32(toPosition.x);
+	writer.writeI32(toPosition.y);
+	writer.writeI32(toPosition.floor);
+	writer.writeByte(direction);
+	writer.writeByte(isAuthoritativeCorrection ? 1 : 0);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildCreatureHealthFrame(uint32_t actorId, uint16_t currentHealth, uint16_t maximumHealth) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::CreatureHealth);
+	writer.writeU32(actorId);
+	writer.writeU16(currentHealth);
+	writer.writeU16(maximumHealth);
 	return writer.finalize();
 }
 
@@ -786,7 +899,16 @@ ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uin
 		return action;
 	}
 
-	action.outboundFrames.emplace_back(buildMovementResultFrame(actorId, captureViewportPosition(activePlayer->getPosition()), false, "movement_not_implemented"));
+	if (pendingMovement.has_value()) {
+		action.outboundFrames.emplace_back(buildMovementResultFrame(actorId, captureViewportPosition(activePlayer->getPosition()), false, "movement_pending"));
+		return action;
+	}
+
+	pendingMovement = PendingMovementIntent {
+		.actorId = actorId,
+		.direction = direction,
+	};
+	g_game().playerMove(activePlayer->getID(), *canaryDirection);
 	return action;
 }
 
@@ -891,6 +1013,20 @@ ProtocolUnityWorldPosition ProtocolUnity::captureViewportPosition(const Position
 		.y = static_cast<int32_t>(position.y) - snapshotOrigin.y,
 		.floor = static_cast<int32_t>(position.z),
 	};
+}
+
+void ProtocolUnity::sendVisibleCreatureSpawn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) {
+	if (!activePlayer || !viewer || !creature || viewer != activePlayer || creature == activePlayer || creature->isRemoved()) {
+		return;
+	}
+
+	if (!viewer->canSeeCreature(creature)) {
+		return;
+	}
+
+	if (visibleActorIds.insert(creature->getID()).second) {
+		sendRawFrame(buildCreatureSpawnFrame(captureActorState(creature)));
+	}
 }
 
 ProtocolUnitySession &ProtocolUnity::getSession() {

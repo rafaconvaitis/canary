@@ -1013,6 +1013,14 @@ std::shared_ptr<ProtocolGame> Player::getClient() const {
 	return client;
 }
 
+void Player::setProtocolObserver(const std::shared_ptr<PlayerProtocolObserver> &observer) {
+	protocolObserver = observer;
+}
+
+void Player::clearProtocolObserver() {
+	protocolObserver.reset();
+}
+
 bool Player::hasSecureMode() const {
 	return secureMode;
 }
@@ -2083,6 +2091,10 @@ void Player::sendCancelWalk() const {
 	if (client) {
 		client->sendCancelWalk();
 	}
+
+	if (const auto &observer = protocolObserver.lock()) {
+		observer->onPlayerCancelWalk(getPlayer());
+	}
 }
 
 void Player::sendChangeSpeed(const std::shared_ptr<Creature> &creature, uint16_t newSpeed) const {
@@ -2092,6 +2104,10 @@ void Player::sendChangeSpeed(const std::shared_ptr<Creature> &creature, uint16_t
 }
 
 void Player::sendCreatureHealth(const std::shared_ptr<Creature> &creature) const {
+	if (const auto &observer = protocolObserver.lock()) {
+		observer->onPlayerCreatureHealth(getPlayer(), creature);
+	}
+
 	if (client) {
 		client->sendCreatureHealth(creature);
 	}
@@ -8520,6 +8536,12 @@ void Player::postAddNotification(const std::shared_ptr<Thing> &thing, const std:
 			updateSaleShopList(item);
 		}
 	} else if (const auto &creature = thing->getCreature()) {
+		if (link == LINK_NEAR) {
+			if (const auto &observer = protocolObserver.lock()) {
+				observer->onPlayerCreatureBecameVisible(getPlayer(), creature);
+			}
+		}
+
 		if (creature == getPlayer()) {
 			closeContainersOutOfRange();
 		}
@@ -8585,6 +8607,12 @@ void Player::postRemoveNotification(const std::shared_ptr<Thing> &thing, const s
 		if (shopOwner && !scheduledSaleUpdate && requireListUpdate) {
 			updateSaleShopList(item);
 		}
+	} else if (link == LINK_NEAR) {
+		if (const auto &creature = copyThing->getCreature()) {
+			if (const auto &observer = protocolObserver.lock()) {
+				observer->onPlayerCreatureBecameInvisible(thisPlayer, creature);
+			}
+		}
 	}
 }
 
@@ -8612,7 +8640,15 @@ void Player::sendCreatureAppear(const std::shared_ptr<Creature> &creature, const
 	}
 
 	auto tile = creature->getTile();
-	if (!tile || !client) {
+	if (!tile) {
+		return;
+	}
+
+	if (const auto &observer = protocolObserver.lock()) {
+		observer->onPlayerCreatureAppear(getPlayer(), creature, pos, isLogin);
+	}
+
+	if (!client) {
 		return;
 	}
 
@@ -8625,6 +8661,10 @@ void Player::sendCreatureAppear(const std::shared_ptr<Creature> &creature, const
 	client->sendAddCreature(creature, pos, stackpos, isLogin);
 }
 void Player::sendCreatureMove(const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport) const {
+	if (const auto &observer = protocolObserver.lock()) {
+		observer->onPlayerCreatureMove(getPlayer(), creature, newPos, newStackPos, oldPos, oldStackPos, teleport);
+	}
+
 	if (client) {
 		client->sendMoveCreature(creature, newPos, newStackPos, oldPos, oldStackPos, teleport);
 	}
@@ -8638,6 +8678,10 @@ void Player::sendCreatureTurn(const std::shared_ptr<Creature> &creature) {
 	auto tile = creature->getTile();
 	if (!tile) {
 		return;
+	}
+
+	if (const auto &observer = protocolObserver.lock()) {
+		observer->onPlayerCreatureTurn(getPlayer(), creature);
 	}
 
 	if (client && canSeeCreature(creature)) {

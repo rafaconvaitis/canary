@@ -11,6 +11,7 @@
 
 #include "server/network/protocol/protocol.hpp"
 #include "server/network/protocol/protocolunity_contract.hpp"
+#include "creatures/players/player_protocol_observer.hpp"
 
 class Player;
 class Creature;
@@ -173,7 +174,7 @@ private:
 	MovementHandler movementHandler {};
 };
 
-class ProtocolUnity final : public Protocol {
+class ProtocolUnity final : public Protocol, public PlayerProtocolObserver {
 public:
 	enum { SERVER_SENDS_FIRST = true };
 	enum { PROTOCOL_IDENTIFIER = 0 };
@@ -187,8 +188,21 @@ public:
 
 	void onConnectionAccepted() override;
 	void onRecvFirstMessage(NetworkMessage &msg) override;
+	void onPlayerCancelWalk(const std::shared_ptr<const Player> &viewer) override;
+	void onPlayerCreatureAppear(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature, const Position &pos, bool isLogin) override;
+	void onPlayerCreatureMove(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport) override;
+	void onPlayerCreatureTurn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
+	void onPlayerCreatureHealth(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
+	void onPlayerCreatureBecameVisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
+	void onPlayerCreatureBecameInvisible(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature) override;
 
 private:
+	struct PendingMovementIntent {
+		uint32_t actorId = 0;
+		uint8_t direction = 0;
+	};
+
+	[[nodiscard]] std::shared_ptr<ProtocolUnity> getThis();
 	void parsePacket(NetworkMessage &msg) override;
 	void release() override;
 	void processFrame(NetworkMessage &msg);
@@ -197,6 +211,8 @@ private:
 	[[nodiscard]] ProtocolUnityEnterWorldResponse enterWorld(uint32_t accountId, uint32_t characterId);
 	[[nodiscard]] std::vector<std::vector<uint8_t>> buildPendingWorldBootstrapFrames();
 	[[nodiscard]] std::vector<uint8_t> buildCreatureSpawnFrame(const ProtocolUnityActorState &actor) const;
+	[[nodiscard]] std::vector<uint8_t> buildCreatureMoveFrame(uint32_t actorId, const ProtocolUnityWorldPosition &fromPosition, const ProtocolUnityWorldPosition &toPosition, uint8_t direction, bool isAuthoritativeCorrection) const;
+	[[nodiscard]] std::vector<uint8_t> buildCreatureHealthFrame(uint32_t actorId, uint16_t currentHealth, uint16_t maximumHealth) const;
 	[[nodiscard]] std::vector<uint8_t> buildCreatureDespawnFrame(uint32_t actorId, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildInventorySnapshotFrame(uint32_t actorId, std::span<const ProtocolUnityInventorySlotState> slots) const;
 	[[nodiscard]] std::vector<uint8_t> buildMapSnapshotFrame(int32_t width, int32_t height, int32_t floor, std::span<const ProtocolUnityTileState> tiles) const;
@@ -206,6 +222,7 @@ private:
 	[[nodiscard]] std::vector<ProtocolUnityInventorySlotState> captureInventorySnapshot() const;
 	[[nodiscard]] std::vector<ProtocolUnityTileState> captureMapSnapshotTiles(int32_t &width, int32_t &height, int32_t &floor);
 	[[nodiscard]] ProtocolUnityWorldPosition captureViewportPosition(const Position &position) const;
+	void sendVisibleCreatureSpawn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature);
 	[[nodiscard]] ProtocolUnitySession &getSession();
 	[[nodiscard]] static const ProtocolUnityContract &getContract();
 
@@ -214,4 +231,5 @@ private:
 	bool pendingWorldBootstrap = false;
 	std::unordered_set<uint32_t> visibleActorIds {};
 	ProtocolUnityWorldPosition snapshotOrigin {};
+	std::optional<PendingMovementIntent> pendingMovement {};
 };
