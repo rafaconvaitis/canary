@@ -180,7 +180,7 @@ public:
 
 	void setBufferPosition(MsgSize_t newPosition);
 
-	uint16_t getLengthHeader() const;
+	uint32_t getLengthHeader(size_t headerBytes = HEADER_LENGTH) const;
 
 	bool isOverrun() const;
 
@@ -188,7 +188,7 @@ public:
 
 	const uint8_t* getBuffer() const;
 
-	uint8_t* getBodyBuffer();
+	uint8_t* getBodyBuffer(size_t headerBytes = HEADER_LENGTH);
 
 	bool canAdd(size_t size) const;
 

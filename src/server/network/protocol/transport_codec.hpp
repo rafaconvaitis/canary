@@ -14,6 +14,7 @@
 #ifndef USE_PRECOMPILED_HEADERS
 	#include <cstdint>
 	#include <optional>
+	#include <span>
 #endif
 
 class NetworkMessage;
@@ -29,7 +30,7 @@ public:
 		return profile;
 	}
 
-	[[nodiscard]] std::optional<uint16_t> decodeBodySize(uint16_t rawLengthHeader) const;
+	[[nodiscard]] std::optional<uint32_t> decodeBodySize(std::span<const uint8_t> rawLengthHeader) const;
 	/**
 	 * @brief Encodes an outbound message using the active transport framing.
 	 *
@@ -63,4 +64,5 @@ public:
 	[[nodiscard]] static const TransportCodec &currentModern();
 	[[nodiscard]] static const TransportCodec &legacyRawWithLoginHeader();
 	[[nodiscard]] static const TransportCodec &legacyClassic();
+	[[nodiscard]] static const TransportCodec &protocolUnity();
 };

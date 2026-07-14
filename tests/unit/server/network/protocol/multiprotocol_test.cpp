@@ -142,18 +142,26 @@ TEST(ProtocolProfileRegistryTest, CurrentAnd1100UseDifferentInitialWireBehavior)
 }
 
 TEST(ConnectionTransportTest, ProtocolGameNoLongerImpliesModernFraming) {
-	const auto modernSize = TransportCodecs::currentModern().decodeBodySize(1);
-	const auto rawSize = TransportCodecs::rawClientFirst().decodeBodySize(1);
-	const auto legacySize = TransportCodecs::legacyClassic().decodeBodySize(1);
+	const std::array<uint8_t, 2> modernHeader { 1, 0 };
+	const std::array<uint8_t, 2> rawHeader { 1, 0 };
+	const std::array<uint8_t, 2> legacyHeader { 1, 0 };
+	const std::array<uint8_t, 4> protocolUnityHeader { 9, 0, 0, 0 };
+	const auto modernSize = TransportCodecs::currentModern().decodeBodySize(modernHeader);
+	const auto rawSize = TransportCodecs::rawClientFirst().decodeBodySize(rawHeader);
+	const auto legacySize = TransportCodecs::legacyClassic().decodeBodySize(legacyHeader);
+	const auto protocolUnitySize = TransportCodecs::protocolUnity().decodeBodySize(protocolUnityHeader);
 
 	ASSERT_TRUE(modernSize);
 	ASSERT_TRUE(rawSize);
 	ASSERT_TRUE(legacySize);
+	ASSERT_TRUE(protocolUnitySize);
 	EXPECT_EQ(XTEA_MULTIPLE + CHECKSUM_LENGTH, *modernSize);
 	EXPECT_EQ(1, *rawSize);
 	EXPECT_EQ(1, *legacySize);
+	EXPECT_EQ(9, *protocolUnitySize);
 	EXPECT_EQ(CHECKSUM_LENGTH + 2, TransportCodecs::currentModern().getProfile().serverFirstPacketHeaderBytes);
 	EXPECT_EQ(CHECKSUM_LENGTH + 1, TransportCodecs::legacyClassic().getProfile().serverFirstPacketHeaderBytes);
+	EXPECT_EQ(4, TransportCodecs::protocolUnity().getProfile().outerHeaderBytes);
 }
 
 TEST(ConnectionTransportTest, LegacyEncryptedOutboundHeaderFitsInitialBuffer) {

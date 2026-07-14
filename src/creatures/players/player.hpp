@@ -16,6 +16,7 @@
 #include "items/cylinder.hpp"
 #include "game/movement/position.hpp"
 #include "creatures/creatures_definitions.hpp"
+#include "creatures/players/player_protocol_observer.hpp"
 #include "creatures/players/stash_definitions.hpp"
 
 // Player components are decoupled to reduce complexity. Keeping includes here aids in clarity and maintainability, but avoid including player.hpp in headers to prevent circular dependencies.
@@ -403,6 +404,8 @@ public:
 
 	uint32_t getProtocolVersion() const;
 	std::shared_ptr<ProtocolGame> getClient() const;
+	void setProtocolObserver(const std::shared_ptr<PlayerProtocolObserver> &observer);
+	void clearProtocolObserver();
 
 	bool hasSecureMode() const;
 
@@ -623,6 +626,10 @@ public:
 
 	time_t getLastLoginSaved() const {
 		return lastLoginSaved;
+	}
+
+	void setLastLoginSaved(time_t value) {
+		lastLoginSaved = value;
 	}
 
 	time_t getLastLogout() const {
@@ -1749,6 +1756,7 @@ private:
 	std::shared_ptr<Party> m_party = nullptr;
 	std::shared_ptr<Player> tradePartner = nullptr;
 	std::shared_ptr<ProtocolGame> client = nullptr;
+	std::weak_ptr<PlayerProtocolObserver> protocolObserver {};
 	std::shared_ptr<Task> walkTask;
 	std::shared_ptr<Town> town;
 	std::shared_ptr<Vocation> vocation = nullptr;

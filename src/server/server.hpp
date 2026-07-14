@@ -58,10 +58,14 @@ public:
 	ServicePort &operator=(const ServicePort &) = delete;
 
 	static void openAcceptor(const std::weak_ptr<ServicePort> &weak_service, uint16_t port);
-	void open(uint16_t port);
+	static void openAcceptor(const std::weak_ptr<ServicePort> &weak_service, uint16_t port, const std::string &bindAddress);
+	void open(uint16_t port, const std::string &bindAddress = {});
 	void close() const;
 	bool is_single_socket() const;
 	std::string get_protocol_names() const;
+	[[nodiscard]] const std::string &getBindAddress() const {
+		return bindAddress;
+	}
 
 	bool add_service(const Service_ptr &new_svc);
 	Protocol_ptr make_protocol(bool checksummed, NetworkMessage &msg, const Connection_ptr &connection) const;
@@ -78,6 +82,7 @@ private:
 
 	uint16_t serverPort = 0;
 	bool pendingStart = false;
+	std::string bindAddress {};
 };
 
 class ServiceManager {
@@ -93,7 +98,7 @@ public:
 	void stop();
 
 	template <typename ProtocolType>
-	bool add(uint16_t port);
+	bool add(uint16_t port, const std::string &bindAddress = {});
 
 	bool is_running() const {
 		return acceptors.empty() == false;
@@ -111,7 +116,7 @@ private:
 };
 
 template <typename ProtocolType>
-bool ServiceManager::add(uint16_t port) {
+bool ServiceManager::add(uint16_t port, const std::string &bindAddress /*= {}*/) {
 	if (port == 0) {
 		g_logger().error("[ServiceManager::add] - "
 		                 "No port provided for service {}, service disabled",
@@ -125,10 +130,17 @@ bool ServiceManager::add(uint16_t port) {
 
 	if (foundServicePort == acceptors.end()) {
 		service_port = std::make_shared<ServicePort>(io_service);
-		service_port->open(port);
+		service_port->open(port, bindAddress);
 		acceptors[port] = service_port;
 	} else {
 		service_port = foundServicePort->second;
+
+		if (service_port->getBindAddress() != bindAddress) {
+			g_logger().error("[ServiceManager::add] - "
+			                 "{} cannot share port {} with {} because the bind address differs ('{}' vs '{}')",
+			                 ProtocolType::protocol_name(), port, service_port->get_protocol_names(), bindAddress, service_port->getBindAddress());
+			return false;
+		}
 
 		if (service_port->is_single_socket() || ProtocolType::SERVER_SENDS_FIRST) {
 			g_logger().error("[ServiceManager::add] - "

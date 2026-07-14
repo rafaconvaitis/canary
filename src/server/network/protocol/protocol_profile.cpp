@@ -55,6 +55,7 @@ namespace {
 		.outboundChecksum = CHECKSUM_METHOD_NONE,
 		.compression = CompressionLayout::None,
 		.modernLengthExtraBytes = 0,
+		.outerHeaderBytes = sizeof(uint16_t),
 		.serverFirstPacketHeaderBytes = 0,
 		.hasCryptoHeader = false,
 		.lengthIncludesChecksum = false,
@@ -69,6 +70,7 @@ namespace {
 		.outboundChecksum = CHECKSUM_METHOD_SEQUENCE,
 		.compression = CompressionLayout::Official,
 		.modernLengthExtraBytes = CHECKSUM_LENGTH,
+		.outerHeaderBytes = sizeof(uint16_t),
 		.serverFirstPacketHeaderBytes = CHECKSUM_LENGTH + 2,
 		.hasCryptoHeader = true,
 		.lengthIncludesChecksum = true,
@@ -83,6 +85,7 @@ namespace {
 		.outboundChecksum = CHECKSUM_METHOD_ADLER32,
 		.compression = CompressionLayout::None,
 		.modernLengthExtraBytes = 0,
+		.outerHeaderBytes = sizeof(uint16_t),
 		.serverFirstPacketHeaderBytes = CHECKSUM_LENGTH + 1,
 		.hasCryptoHeader = true,
 		.lengthIncludesChecksum = true,
@@ -97,9 +100,25 @@ namespace {
 		.outboundChecksum = CHECKSUM_METHOD_ADLER32,
 		.compression = CompressionLayout::None,
 		.modernLengthExtraBytes = 0,
+		.outerHeaderBytes = sizeof(uint16_t),
 		.serverFirstPacketHeaderBytes = CHECKSUM_LENGTH + 1,
 		.hasCryptoHeader = true,
 		.lengthIncludesChecksum = true,
+		.sequenceHighBitSignalsCompression = false,
+	};
+
+	constexpr TransportProfile protocolUnityTransport {
+		.id = TransportProfileId::ProtocolUnity,
+		.outerLength = OuterLengthEncoding::RawBodyLength,
+		.encryptedPayload = EncryptedPayloadLayout::None,
+		.inboundChecksum = CHECKSUM_METHOD_NONE,
+		.outboundChecksum = CHECKSUM_METHOD_NONE,
+		.compression = CompressionLayout::None,
+		.modernLengthExtraBytes = 0,
+		.outerHeaderBytes = sizeof(uint32_t),
+		.serverFirstPacketHeaderBytes = 0,
+		.hasCryptoHeader = false,
+		.lengthIncludesChecksum = false,
 		.sequenceHighBitSignalsCompression = false,
 	};
 
@@ -403,6 +422,8 @@ const TransportProfile &ProtocolProfileRegistry::getTransportProfile(TransportPr
 			return legacyRawWithLoginHeaderTransport;
 		case LegacyClassic:
 			return legacyClassicTransport;
+		case ProtocolUnity:
+			return protocolUnityTransport;
 		default:
 			return rawClientFirstTransport;
 	}

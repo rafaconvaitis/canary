@@ -114,7 +114,7 @@ void Connection::accept(Protocol_ptr protocolPtr) {
 		return;
 	}
 
-	acceptInternal(false);
+	acceptInternal(!protocol->requiresProxyIdentificationPrelude());
 }
 
 void Connection::acceptInternal(bool toggleParseHeader) {
@@ -122,7 +122,8 @@ void Connection::acceptInternal(bool toggleParseHeader) {
 	readTimer.async_wait([self = std::weak_ptr<Connection>(shared_from_this())](const std::error_code &error) { Connection::handleTimeout(self, error); });
 
 	try {
-		asio::async_read(socket, asio::buffer(m_msg.getBuffer(), HEADER_LENGTH), [self = shared_from_this(), toggleParseHeader](const std::error_code &error, std::size_t N) {
+		const auto headerLength = getCurrentHeaderLength();
+		asio::async_read(socket, asio::buffer(m_msg.getBuffer(), headerLength), [self = shared_from_this(), toggleParseHeader](const std::error_code &error, std::size_t N) {
 			if (toggleParseHeader) {
 				self->parseHeader(error);
 			} else {
@@ -133,6 +134,10 @@ void Connection::acceptInternal(bool toggleParseHeader) {
 		g_logger().error("[Connection::acceptInternal] - Exception in async_read: {}", e.what());
 		close(FORCE_CLOSE);
 	}
+}
+
+size_t Connection::getCurrentHeaderLength() const {
+	return std::max<size_t>(sizeof(uint16_t), getTransportCodec().getProfile().outerHeaderBytes);
 }
 
 void Connection::parseProxyIdentification(const std::error_code &error) {
@@ -215,7 +220,8 @@ void Connection::parseHeader(const std::error_code &error) {
 		packetsSent = 0;
 	}
 
-	const auto size = getTransportCodec().decodeBodySize(m_msg.getLengthHeader());
+	const auto headerLength = getCurrentHeaderLength();
+	const auto size = getTransportCodec().decodeBodySize(std::span<const uint8_t>(m_msg.getBuffer(), headerLength));
 
 	if (!size || *size > INPUTMESSAGE_MAXSIZE) {
 		close(FORCE_CLOSE);
@@ -227,9 +233,9 @@ void Connection::parseHeader(const std::error_code &error) {
 		readTimer.async_wait([self = std::weak_ptr<Connection>(shared_from_this())](const std::error_code &error) { Connection::handleTimeout(self, error); });
 
 		// Read packet content
-		m_msg.setLength(*size + HEADER_LENGTH);
+		m_msg.setLength(static_cast<NetworkMessage::MsgSize_t>(*size + headerLength));
 		// Read the remainder of proxy identification
-		asio::async_read(socket, asio::buffer(m_msg.getBodyBuffer(), *size), [self = shared_from_this()](const std::error_code &error, std::size_t N) { self->parsePacket(error); });
+		asio::async_read(socket, asio::buffer(m_msg.getBodyBuffer(headerLength), *size), [self = shared_from_this()](const std::error_code &error, std::size_t N) { self->parsePacket(error); });
 	} catch (const std::system_error &e) {
 		g_logger().error("[Connection::parseHeader] - error: {}", e.what());
 		close(FORCE_CLOSE);
@@ -291,7 +297,8 @@ void Connection::parsePacket(const std::error_code &error) {
 
 		if (!skipReadingNextPacket) {
 			// Wait to the next packet
-			asio::async_read(socket, asio::buffer(m_msg.getBuffer(), HEADER_LENGTH), [self = shared_from_this()](const std::error_code &error, std::size_t N) { self->parseHeader(error); });
+			const auto headerLength = getCurrentHeaderLength();
+			asio::async_read(socket, asio::buffer(m_msg.getBuffer(), headerLength), [self = shared_from_this()](const std::error_code &error, std::size_t N) { self->parseHeader(error); });
 		}
 	} catch (const std::system_error &e) {
 		g_logger().error("[Connection::parsePacket] - error: {}", e.what());
@@ -304,7 +311,8 @@ void Connection::resumeWork() {
 	readTimer.async_wait([self = std::weak_ptr<Connection>(shared_from_this())](const std::error_code &error) { Connection::handleTimeout(self, error); });
 
 	try {
-		asio::async_read(socket, asio::buffer(m_msg.getBuffer(), HEADER_LENGTH), [self = shared_from_this()](const std::error_code &error, std::size_t N) { self->parseHeader(error); });
+		const auto headerLength = getCurrentHeaderLength();
+		asio::async_read(socket, asio::buffer(m_msg.getBuffer(), headerLength), [self = shared_from_this()](const std::error_code &error, std::size_t N) { self->parseHeader(error); });
 	} catch (const std::system_error &e) {
 		g_logger().error("[Connection::resumeWork] - Exception in async_read: {}", e.what());
 		close(FORCE_CLOSE);

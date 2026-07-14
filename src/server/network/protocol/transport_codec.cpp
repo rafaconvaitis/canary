@@ -18,8 +18,16 @@
 	#include <limits>
 #endif
 
-std::optional<uint16_t> TransportCodec::decodeBodySize(uint16_t rawLengthHeader) const {
-	uint32_t size = rawLengthHeader;
+std::optional<uint32_t> TransportCodec::decodeBodySize(std::span<const uint8_t> rawLengthHeader) const {
+	if (rawLengthHeader.size() != profile.outerHeaderBytes || rawLengthHeader.empty() || rawLengthHeader.size() > sizeof(uint32_t)) {
+		return std::nullopt;
+	}
+
+	uint32_t size = 0;
+	for (size_t index = 0; index < rawLengthHeader.size(); ++index) {
+		size |= static_cast<uint32_t>(rawLengthHeader[index]) << (index * 8);
+	}
+
 	if (profile.outerLength == OuterLengthEncoding::ModernBlockCount) {
 		size = (size * XTEA_MULTIPLE) + profile.modernLengthExtraBytes;
 	}
@@ -28,7 +36,7 @@ std::optional<uint16_t> TransportCodec::decodeBodySize(uint16_t rawLengthHeader)
 		return std::nullopt;
 	}
 
-	return static_cast<uint16_t>(size);
+	return size;
 }
 
 void TransportCodec::encodeOutbound(Protocol &protocol, OutputMessage &msg) const {
@@ -167,6 +175,8 @@ const TransportCodec &TransportCodecs::get(TransportProfileId id) {
 			return legacyRawWithLoginHeader();
 		case LegacyClassic:
 			return legacyClassic();
+		case ProtocolUnity:
+			return protocolUnity();
 		default:
 			return rawClientFirst();
 	}
@@ -189,5 +199,10 @@ const TransportCodec &TransportCodecs::legacyRawWithLoginHeader() {
 
 const TransportCodec &TransportCodecs::legacyClassic() {
 	static const TransportCodec codec(ProtocolProfileRegistry::getTransportProfile(TransportProfileId::LegacyClassic));
+	return codec;
+}
+
+const TransportCodec &TransportCodecs::protocolUnity() {
+	static const TransportCodec codec(ProtocolProfileRegistry::getTransportProfile(TransportProfileId::ProtocolUnity));
 	return codec;
 }
