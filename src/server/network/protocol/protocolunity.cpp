@@ -122,7 +122,7 @@ namespace {
 	}
 
 	[[nodiscard]] bool isSameProtocolUnityPosition(const ProtocolUnityWorldPosition &lhs, const ProtocolUnityWorldPosition &rhs) {
-		return lhs.x == rhs.x && lhs.y == rhs.y && lhs.floor == rhs.floor;
+		return isSameProtocolUnityWorldPosition(lhs, rhs);
 	}
 
 	template <typename T>
@@ -1228,13 +1228,23 @@ ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uin
 		return action;
 	}
 
+	const auto requestedFromPosition = captureViewportPosition(activePlayer->getPosition());
 	pendingMovement = PendingMovementIntent {
 		.actorId = actorId,
 		.direction = direction,
-		.requestedFromPosition = captureViewportPosition(activePlayer->getPosition()),
+		.requestedFromPosition = requestedFromPosition,
 		.expectedToPosition = captureViewportPosition(getNextPosition(*canaryDirection, activePlayer->getPosition())),
 	};
 	g_game().playerMove(activePlayer->getID(), *canaryDirection);
+	if (pendingMovement.has_value() &&
+		pendingMovement->actorId == actorId &&
+		shouldSynthesizeImmediateMovementCancel(
+			requestedFromPosition,
+			captureViewportPosition(activePlayer->getPosition()),
+			activePlayer->getWalkSize()
+		)) {
+		onPlayerCancelWalk(activePlayer);
+	}
 	return action;
 }
 

@@ -386,6 +386,21 @@ TEST(ProtocolUnitySessionTest, MovementRequestInWorldDispatchesMovementHandler) 
 	EXPECT_NO_THROW(reader.expectFullyConsumed());
 }
 
+TEST(ProtocolUnityMovementTest, ImmediateCancelRequiresNoQueuedWalkSteps) {
+	const ProtocolUnityWorldPosition requestedFrom { .x = 8, .y = 6, .floor = 7 };
+	const ProtocolUnityWorldPosition unchangedPosition { .x = 8, .y = 6, .floor = 7 };
+
+	EXPECT_TRUE(shouldSynthesizeImmediateMovementCancel(requestedFrom, unchangedPosition, 0));
+	EXPECT_FALSE(shouldSynthesizeImmediateMovementCancel(requestedFrom, unchangedPosition, 1));
+}
+
+TEST(ProtocolUnityMovementTest, ImmediateCancelIsSkippedAfterAuthoritativePositionChanges) {
+	const ProtocolUnityWorldPosition requestedFrom { .x = 8, .y = 6, .floor = 7 };
+	const ProtocolUnityWorldPosition movedPosition { .x = 7, .y = 6, .floor = 7 };
+
+	EXPECT_FALSE(shouldSynthesizeImmediateMovementCancel(requestedFrom, movedPosition, 0));
+}
+
 TEST(ProtocolUnitySessionTest, AttackRequestBeforeWorldEntryReturnsStructuredError) {
 	auto session = makeSession();
 	const auto helloFrame = ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex);
