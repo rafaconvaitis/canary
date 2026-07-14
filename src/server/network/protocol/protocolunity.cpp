@@ -39,6 +39,7 @@
 	#include <filesystem>
 	#include <limits>
 	#include <memory>
+	#include <mutex>
 
 	#include <fmt/format.h>
 #endif
@@ -46,6 +47,9 @@
 namespace {
 	constexpr uint8_t PROTOCOL_UNITY_CAPABILITY_STRUCTURED_ERRORS = 1U << 0;
 	constexpr uint32_t PROTOCOL_UNITY_DISCONNECT_VIOLATION_THRESHOLD = 3;
+	std::mutex protocolUnityGroundItemIdMutex {};
+	std::unordered_map<const Item*, uint32_t> protocolUnityGroundItemIds {};
+	uint32_t protocolUnityNextGroundItemInstanceId = 1;
 
 	[[nodiscard]] std::string getAdvertisedServerName() {
 		const auto configuredName = g_configManager().getString(SERVER_NAME);
@@ -156,6 +160,28 @@ namespace {
 		}
 	}
 
+	[[nodiscard]] std::string_view toProtocolUnityPickupReason(ReturnValue value) {
+		switch (value) {
+			case RETURNVALUE_NOTENOUGHCAPACITY:
+				return "not_enough_capacity";
+			case RETURNVALUE_CONTAINERNOTENOUGHROOM:
+			case RETURNVALUE_BOTHHANDSNEEDTOBEFREE:
+			case RETURNVALUE_NEEDEXCHANGE:
+				return "inventory_full";
+			case RETURNVALUE_CANNOTPICKUP:
+			case RETURNVALUE_NOTMOVABLE:
+				return "not_pickupable";
+			case RETURNVALUE_CANNOTTHROW:
+			case RETURNVALUE_THEREISNOWAY:
+			case RETURNVALUE_DESTINATIONOUTOFREACH:
+			case RETURNVALUE_FIRSTGODOWNSTAIRS:
+			case RETURNVALUE_FIRSTGOUPSTAIRS:
+				return "out_of_range";
+			default:
+				return "pickup_failed";
+		}
+	}
+
 	[[nodiscard]] std::optional<ProtocolUnityCharacterSummary> loadProtocolUnityCharacterSummary(const std::string &characterName) {
 		auto player = std::make_shared<Player>(std::shared_ptr<ProtocolGame> {});
 		player->setName(characterName);
@@ -232,7 +258,8 @@ ProtocolUnitySession::ProtocolUnitySession(
 	LoginHandler initLoginHandler,
 	EnterWorldHandler initEnterWorldHandler,
 	MovementHandler initMovementHandler,
-	AttackHandler initAttackHandler
+	AttackHandler initAttackHandler,
+	PickupHandler initPickupHandler
 ) :
 	contract(initContract),
 	serverName(std::move(initServerName)),
@@ -241,7 +268,8 @@ ProtocolUnitySession::ProtocolUnitySession(
 	loginHandler(std::move(initLoginHandler)),
 	enterWorldHandler(std::move(initEnterWorldHandler)),
 	movementHandler(std::move(initMovementHandler)),
-	attackHandler(std::move(initAttackHandler)) {
+	attackHandler(std::move(initAttackHandler)),
+	pickupHandler(std::move(initPickupHandler)) {
 	transitionTo(ProtocolUnitySessionState::AwaitingHello);
 }
 
@@ -312,7 +340,7 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleDecodedFrame(const Protoc
 			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
 				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
 			}
-			return reject("invalid_state", "Gameplay requests are blocked until authentication and world entry exist.", true, false);
+			return handlePickupItemRequest(frame.payload);
 		default:
 			return reject("unsupported_opcode", fmt::format("Opcode '{}' is not implemented yet.", contract.requireOpcode(frame.opcode).name), false, false);
 	}
@@ -434,6 +462,22 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleAttackRequest(std::span<c
 	const auto targetId = reader.readU32();
 	reader.expectFullyConsumed();
 	return attackHandler(actorId, targetId);
+}
+
+ProtocolUnitySessionAction ProtocolUnitySession::handlePickupItemRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "PickupItemRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!pickupHandler) {
+		return reject("pickup_unavailable", "ProtocolUnity pickup is not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto itemInstanceId = reader.readU32();
+	reader.expectFullyConsumed();
+	return pickupHandler(actorId, itemInstanceId);
 }
 
 ProtocolUnitySessionAction ProtocolUnitySession::handlePing(std::span<const uint8_t> payload) const {
@@ -646,6 +690,7 @@ void ProtocolUnity::onPlayerCreatureHealth(const std::shared_ptr<const Player> &
 		if (deadActorIds.insert(creature->getID()).second) {
 			sendRawFrame(buildCreatureDeathFrame(creature->getID(), creature->getLastHitCreatureId()));
 		}
+		flushDeferredGroundItemFrames(creature->getID());
 	} else {
 		deadActorIds.erase(creature->getID());
 	}
@@ -685,7 +730,15 @@ void ProtocolUnity::onPlayerTileItemAdded(const std::shared_ptr<const Player> &v
 		return;
 	}
 
-	sendRawFrame(buildItemSpawnFrame(captureGroundItemState(item, position)));
+	const auto frame = buildItemSpawnFrame(captureGroundItemState(item, position));
+	for (const auto &[actorId, pendingPosition] : pendingDeathLootPositions) {
+		if (pendingPosition == position) {
+			deferredGroundItemFrames[actorId].emplace_back(frame);
+			return;
+		}
+	}
+
+	sendRawFrame(frame);
 }
 
 void ProtocolUnity::onPlayerTileItemUpdated(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Tile> &, const Position &position, const std::shared_ptr<Item> &item) {
@@ -693,7 +746,15 @@ void ProtocolUnity::onPlayerTileItemUpdated(const std::shared_ptr<const Player> 
 		return;
 	}
 
-	sendRawFrame(buildItemSpawnFrame(captureGroundItemState(item, position)));
+	const auto frame = buildItemSpawnFrame(captureGroundItemState(item, position));
+	for (const auto &[actorId, pendingPosition] : pendingDeathLootPositions) {
+		if (pendingPosition == position) {
+			deferredGroundItemFrames[actorId].emplace_back(frame);
+			return;
+		}
+	}
+
+	sendRawFrame(frame);
 }
 
 void ProtocolUnity::onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &, const std::shared_ptr<Item> &item) {
@@ -706,8 +767,18 @@ void ProtocolUnity::onPlayerTileItemRemoved(const std::shared_ptr<const Player> 
 		return;
 	}
 
-	sendRawFrame(buildItemRemoveFrame(iterator->second, "removed"));
+	const auto frame = buildItemRemoveFrame(iterator->second, "removed");
+	if (pendingPickupItemInstanceId.has_value() && pendingPickupItemInstanceId.value() == iterator->second) {
+		deferredPickupFrames.emplace_back(frame);
+	} else {
+		sendRawFrame(frame);
+	}
+	visibleGroundItemsByInstanceId.erase(iterator->second);
 	visibleGroundItemIds.erase(iterator);
+	if (item->isRemoved()) {
+		std::scoped_lock lock(protocolUnityGroundItemIdMutex);
+		protocolUnityGroundItemIds.erase(item.get());
+	}
 }
 
 void ProtocolUnity::onPlayerInventoryUpdated(const std::shared_ptr<const Player> &viewer, uint8_t slotIndex, const std::shared_ptr<Item> &item) {
@@ -715,12 +786,21 @@ void ProtocolUnity::onPlayerInventoryUpdated(const std::shared_ptr<const Player>
 		return;
 	}
 
-	sendRawFrame(buildInventoryUpdateFrame(activePlayer->getID(), captureInventorySlotState(slotIndex, item)));
+	const auto frame = buildInventoryUpdateFrame(activePlayer->getID(), captureInventorySlotState(slotIndex, item));
+	if (pendingPickupItemInstanceId.has_value()) {
+		deferredPickupFrames.emplace_back(frame);
+		return;
+	}
+
+	sendRawFrame(frame);
 }
 
 void ProtocolUnity::onPlayerCombatResult(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &target, int32_t damage, bool targetDied) {
 	if (!activePlayer || !viewer || !attacker || !target || viewer != activePlayer || attacker != activePlayer) {
 		return;
+	}
+	if (targetDied) {
+		pendingDeathLootPositions[target->getID()] = target->getPosition();
 	}
 
 	sendRawFrame(buildCombatResultFrame(
@@ -764,8 +844,12 @@ void ProtocolUnity::cleanupActivePlayer() {
 	visibleActorIds.clear();
 	deadActorIds.clear();
 	visibleGroundItemIds.clear();
+	visibleGroundItemsByInstanceId.clear();
+	pendingDeathLootPositions.clear();
+	deferredGroundItemFrames.clear();
+	pendingPickupItemInstanceId.reset();
+	deferredPickupFrames.clear();
 	pendingMovement.reset();
-	nextGroundItemInstanceId = 1;
 
 	if (!activePlayer) {
 		return;
@@ -937,6 +1021,7 @@ std::vector<std::vector<uint8_t>> ProtocolUnity::buildPendingWorldBootstrapFrame
 	visibleActorIds = std::move(nextVisibleActorIds);
 
 	visibleGroundItemIds.clear();
+	visibleGroundItemsByInstanceId.clear();
 	for (int32_t localY = 0; localY < height; ++localY) {
 		for (int32_t localX = 0; localX < width; ++localX) {
 			const auto absoluteX = snapshotOrigin.x + localX;
@@ -1069,6 +1154,15 @@ std::vector<uint8_t> ProtocolUnity::buildItemRemoveFrame(uint32_t itemInstanceId
 	return writer.finalize();
 }
 
+std::vector<uint8_t> ProtocolUnity::buildPickupItemResultFrame(uint32_t actorId, uint32_t itemInstanceId, bool accepted, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::PickupItemResult);
+	writer.writeU32(actorId);
+	writer.writeU32(itemInstanceId);
+	writer.writeByte(accepted ? 1 : 0);
+	writer.writeString(reason);
+	return writer.finalize();
+}
+
 std::vector<uint8_t> ProtocolUnity::buildMapSnapshotFrame(int32_t width, int32_t height, int32_t floor, std::span<const ProtocolUnityTileState> tiles) const {
 	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::MapSnapshot);
 	writer.writeI32(width);
@@ -1187,6 +1281,71 @@ ProtocolUnitySessionAction ProtocolUnity::attackTarget(uint32_t actorId, uint32_
 		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, targetHealth, false, false, "target_not_visible"));
 	}
 
+	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::pickupGroundItem(uint32_t actorId, uint32_t itemInstanceId) {
+	ProtocolUnitySessionAction action;
+	if (!activePlayer || activePlayer->isRemoved()) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "player_unavailable"));
+		return action;
+	}
+
+	if (activePlayer->getID() != actorId) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "actor_mismatch"));
+		return action;
+	}
+
+	if (itemInstanceId == 0) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "unknown_item"));
+		return action;
+	}
+
+	const auto visibleItemIterator = visibleGroundItemsByInstanceId.find(itemInstanceId);
+	const auto item = visibleItemIterator != visibleGroundItemsByInstanceId.end() ? visibleItemIterator->second.lock() : nullptr;
+
+	if (!item || item->isRemoved()) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "unknown_item"));
+		return action;
+	}
+
+	const auto fromCylinder = item->getParent();
+	const auto fromTile = fromCylinder ? fromCylinder->getTile() : nullptr;
+	if (!fromCylinder || !fromTile) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "unknown_item"));
+		return action;
+	}
+
+	const auto itemPosition = fromTile->getPosition();
+	if (!activePlayer->canSee(itemPosition) || activePlayer->getPosition().z != itemPosition.z || !Position::areInRange<1, 1>(activePlayer->getPosition(), itemPosition)) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "out_of_range"));
+		return action;
+	}
+
+	if (fromCylinder->getThingIndex(item) == -1) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, "unknown_item"));
+		return action;
+	}
+
+	const uint32_t itemCount = std::max<uint32_t>(1, item->isStackable() ? item->getItemCount() : 1);
+	const ReturnValue preflight = g_game().internalAddItem(activePlayer, item, INDEX_WHEREEVER, 0, true);
+	if (preflight != RETURNVALUE_NOERROR) {
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, toProtocolUnityPickupReason(preflight)));
+		return action;
+	}
+
+	pendingPickupItemInstanceId = itemInstanceId;
+	std::shared_ptr<Item> movedItem = nullptr;
+	const ReturnValue moveResult = g_game().internalMoveItem(fromCylinder, activePlayer, INDEX_WHEREEVER, item, itemCount, &movedItem, 0, activePlayer);
+	if (moveResult != RETURNVALUE_NOERROR) {
+		pendingPickupItemInstanceId.reset();
+		deferredPickupFrames.clear();
+		action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, false, toProtocolUnityPickupReason(moveResult)));
+		return action;
+	}
+
+	action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, true, "picked_up"));
+	appendDeferredPickupFrames(action);
 	return action;
 }
 
@@ -1322,12 +1481,44 @@ uint32_t ProtocolUnity::ensureGroundItemInstanceId(const std::shared_ptr<Item> &
 
 	const auto iterator = visibleGroundItemIds.find(item.get());
 	if (iterator != visibleGroundItemIds.end()) {
+		visibleGroundItemsByInstanceId[iterator->second] = item;
 		return iterator->second;
 	}
 
-	const auto itemInstanceId = nextGroundItemInstanceId++;
+	std::scoped_lock lock(protocolUnityGroundItemIdMutex);
+	const auto globalIterator = protocolUnityGroundItemIds.find(item.get());
+	if (globalIterator != protocolUnityGroundItemIds.end()) {
+		visibleGroundItemIds.emplace(item.get(), globalIterator->second);
+		visibleGroundItemsByInstanceId[globalIterator->second] = item;
+		return globalIterator->second;
+	}
+
+	const auto itemInstanceId = protocolUnityNextGroundItemInstanceId++;
+	protocolUnityGroundItemIds.emplace(item.get(), itemInstanceId);
 	visibleGroundItemIds.emplace(item.get(), itemInstanceId);
+	visibleGroundItemsByInstanceId[itemInstanceId] = item;
 	return itemInstanceId;
+}
+
+void ProtocolUnity::flushDeferredGroundItemFrames(uint32_t actorId) {
+	const auto iterator = deferredGroundItemFrames.find(actorId);
+	if (iterator != deferredGroundItemFrames.end()) {
+		for (const auto &frame : iterator->second) {
+			sendRawFrame(frame);
+		}
+		deferredGroundItemFrames.erase(iterator);
+	}
+
+	pendingDeathLootPositions.erase(actorId);
+}
+
+void ProtocolUnity::appendDeferredPickupFrames(ProtocolUnitySessionAction &action) {
+	for (const auto &frame : deferredPickupFrames) {
+		action.outboundFrames.emplace_back(frame);
+	}
+
+	deferredPickupFrames.clear();
+	pendingPickupItemInstanceId.reset();
 }
 
 void ProtocolUnity::syncVisibleGroundItems() {
@@ -1378,6 +1569,7 @@ void ProtocolUnity::syncVisibleGroundItems() {
 		}
 
 		sendRawFrame(buildItemRemoveFrame(iterator->second, "out_of_view"));
+		visibleGroundItemsByInstanceId.erase(iterator->second);
 		iterator = visibleGroundItemIds.erase(iterator);
 	}
 }
@@ -1416,6 +1608,9 @@ ProtocolUnitySession &ProtocolUnity::getSession() {
 			},
 			[this](uint32_t actorId, uint32_t targetId) {
 				return attackTarget(actorId, targetId);
+			},
+			[this](uint32_t actorId, uint32_t itemInstanceId) {
+				return pickupGroundItem(actorId, itemInstanceId);
 			}
 		);
 	}

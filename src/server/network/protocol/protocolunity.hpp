@@ -130,6 +130,7 @@ public:
 	using EnterWorldHandler = std::function<ProtocolUnityEnterWorldResponse(uint32_t accountId, uint32_t characterId)>;
 	using MovementHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint8_t direction)>;
 	using AttackHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint32_t targetId)>;
+	using PickupHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint32_t itemInstanceId)>;
 
 	ProtocolUnitySession(
 		const ProtocolUnityContract &initContract,
@@ -139,7 +140,8 @@ public:
 		LoginHandler initLoginHandler = {},
 		EnterWorldHandler initEnterWorldHandler = {},
 		MovementHandler initMovementHandler = {},
-		AttackHandler initAttackHandler = {}
+		AttackHandler initAttackHandler = {},
+		PickupHandler initPickupHandler = {}
 	);
 
 	[[nodiscard]] ProtocolUnitySessionState getState() const;
@@ -158,6 +160,7 @@ private:
 	[[nodiscard]] ProtocolUnitySessionAction handleEnterWorldRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleMovementRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleAttackRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handlePickupItemRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handlePing(std::span<const uint8_t> payload) const;
 	[[nodiscard]] ProtocolUnitySessionAction reject(std::string_view code, std::string_view detail, bool countViolation, bool closeConnection);
 	[[nodiscard]] std::vector<uint8_t> buildServerHelloFrame() const;
@@ -185,6 +188,7 @@ private:
 	EnterWorldHandler enterWorldHandler {};
 	MovementHandler movementHandler {};
 	AttackHandler attackHandler {};
+	PickupHandler pickupHandler {};
 };
 
 class ProtocolUnity final : public Protocol, public PlayerProtocolObserver {
@@ -240,11 +244,13 @@ private:
 	[[nodiscard]] std::vector<uint8_t> buildInventoryUpdateFrame(uint32_t actorId, const ProtocolUnityInventorySlotState &slot) const;
 	[[nodiscard]] std::vector<uint8_t> buildItemSpawnFrame(const ProtocolUnityGroundItemState &item) const;
 	[[nodiscard]] std::vector<uint8_t> buildItemRemoveFrame(uint32_t itemInstanceId, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildPickupItemResultFrame(uint32_t actorId, uint32_t itemInstanceId, bool accepted, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildMapSnapshotFrame(int32_t width, int32_t height, int32_t floor, std::span<const ProtocolUnityTileState> tiles) const;
 	[[nodiscard]] std::vector<uint8_t> buildMovementResultFrame(uint32_t actorId, const ProtocolUnityWorldPosition &position, bool accepted, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildCombatResultFrame(uint32_t attackerId, uint32_t targetId, int16_t damage, uint16_t targetHealthAfterHit, bool targetDied, bool attackAccepted, std::string_view reason) const;
 	[[nodiscard]] ProtocolUnitySessionAction moveActivePlayer(uint32_t actorId, uint8_t direction);
 	[[nodiscard]] ProtocolUnitySessionAction attackTarget(uint32_t actorId, uint32_t targetId);
+	[[nodiscard]] ProtocolUnitySessionAction pickupGroundItem(uint32_t actorId, uint32_t itemInstanceId);
 	[[nodiscard]] ProtocolUnityActorState captureActorState(const std::shared_ptr<Creature> &creature) const;
 	[[nodiscard]] std::vector<ProtocolUnityInventorySlotState> captureInventorySnapshot() const;
 	[[nodiscard]] ProtocolUnityInventorySlotState captureInventorySlotState(uint8_t slotIndex, const std::shared_ptr<Item> &item) const;
@@ -252,6 +258,8 @@ private:
 	[[nodiscard]] std::vector<ProtocolUnityTileState> captureMapSnapshotTiles(int32_t &width, int32_t &height, int32_t &floor);
 	[[nodiscard]] ProtocolUnityWorldPosition captureViewportPosition(const Position &position) const;
 	[[nodiscard]] uint32_t ensureGroundItemInstanceId(const std::shared_ptr<Item> &item);
+	void flushDeferredGroundItemFrames(uint32_t actorId);
+	void appendDeferredPickupFrames(ProtocolUnitySessionAction &action);
 	void syncVisibleGroundItems();
 	void sendVisibleCreatureSpawn(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &creature);
 	[[nodiscard]] ProtocolUnitySession &getSession();
@@ -263,7 +271,11 @@ private:
 	std::unordered_set<uint32_t> visibleActorIds {};
 	std::unordered_set<uint32_t> deadActorIds {};
 	std::unordered_map<const Item*, uint32_t> visibleGroundItemIds {};
+	std::unordered_map<uint32_t, std::weak_ptr<Item>> visibleGroundItemsByInstanceId {};
+	std::unordered_map<uint32_t, Position> pendingDeathLootPositions {};
+	std::unordered_map<uint32_t, std::vector<std::vector<uint8_t>>> deferredGroundItemFrames {};
+	std::optional<uint32_t> pendingPickupItemInstanceId {};
+	std::vector<std::vector<uint8_t>> deferredPickupFrames {};
 	ProtocolUnityWorldPosition snapshotOrigin {};
 	std::optional<PendingMovementIntent> pendingMovement {};
-	uint32_t nextGroundItemInstanceId = 1;
 };

@@ -1385,10 +1385,15 @@ std::shared_ptr<KV> Player::kv() const {
 }
 
 bool Player::canSee(const Position &pos) {
-	if (!client) {
-		return false;
+	if (client) {
+		return client->canSee(pos);
 	}
-	return client->canSee(pos);
+
+	if (!protocolObserver.expired()) {
+		return Creature::canSee(pos);
+	}
+
+	return false;
 }
 
 bool Player::canSeeCreature(const std::shared_ptr<Creature> &creature) const {
@@ -2270,6 +2275,12 @@ void Player::removeMagicEffect(const Position &pos, uint16_t type) const {
 
 void Player::sendPing() {
 	const int64_t timeNow = OTSYS_TIME();
+
+	if (!client && !protocolObserver.expired()) {
+		lastPing = timeNow;
+		lastPong = timeNow;
+		return;
+	}
 
 	bool hasLostConnection = false;
 	if ((timeNow - lastPing) >= 5000) {
