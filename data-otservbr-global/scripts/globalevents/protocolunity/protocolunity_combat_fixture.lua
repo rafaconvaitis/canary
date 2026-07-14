@@ -1,5 +1,6 @@
 local fixtureRuntimePath = "protocolunity-combat-fixture.lua"
 local pickupProbeItemId = 3091
+local loginRefreshGeneration = 0
 local formationPatterns = {
 	{ alpha = { x = -1, y = 0 }, beta = { x = 1, y = 0 } },
 	{ alpha = { x = 1, y = 0 }, beta = { x = -1, y = 0 } },
@@ -472,6 +473,19 @@ local function refreshAfterLogin(playerId)
 	refreshFixtureForPlayer(loginPlayer, fixture)
 end
 
+local function scheduleLoginRefresh(playerId)
+	loginRefreshGeneration = loginRefreshGeneration + 1
+	local generation = loginRefreshGeneration
+
+	addEvent(function()
+		if generation ~= loginRefreshGeneration then
+			return
+		end
+
+		refreshAfterLogin(playerId)
+	end, 400)
+end
+
 local function onFixtureStartup()
 	local fixture = tryLoadFixture()
 	if not fixture then
@@ -494,9 +508,7 @@ local function onFixtureLogin(player)
 		return true
 	end
 
-	addEvent(function()
-		refreshAfterLogin(player:getId())
-	end, 400)
+	scheduleLoginRefresh(player:getId())
 
 	return true
 end
