@@ -49,6 +49,18 @@ struct ProtocolUnityWorldPosition {
 	int32_t floor = 0;
 };
 
+[[nodiscard]] constexpr bool isSameProtocolUnityWorldPosition(const ProtocolUnityWorldPosition &lhs, const ProtocolUnityWorldPosition &rhs) {
+	return lhs.x == rhs.x && lhs.y == rhs.y && lhs.floor == rhs.floor;
+}
+
+[[nodiscard]] constexpr bool shouldSynthesizeImmediateMovementCancel(
+	const ProtocolUnityWorldPosition &requestedFromPosition,
+	const ProtocolUnityWorldPosition &currentPosition,
+	int32_t queuedWalkSteps
+) {
+	return queuedWalkSteps == 0 && isSameProtocolUnityWorldPosition(requestedFromPosition, currentPosition);
+}
+
 struct ProtocolUnityCharacterSummary {
 	uint32_t characterId = 0;
 	std::string name {};
