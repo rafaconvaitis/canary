@@ -58,8 +58,8 @@ TEST(ProtocolUnityContractTest, LoadsCanonicalManifestAndOpcodeRegistry) {
 	EXPECT_EQ(4u, contract.framePrefixBytes);
 	EXPECT_EQ(65535u, contract.maximumPacketSize);
 	EXPECT_EQ(1024, contract.maximumStringLength);
-	EXPECT_EQ(28u, contract.opcodes.size());
-	EXPECT_EQ(6u, contract.vectors.size());
+	EXPECT_EQ(34u, contract.opcodes.size());
+	EXPECT_EQ(8u, contract.vectors.size());
 	EXPECT_EQ(2u, contract.negativeVectors.size());
 
 	const auto &clientHello = contract.requireOpcode(ProtocolUnityOpcode::ClientHello);
@@ -72,6 +72,10 @@ TEST(ProtocolUnityContractTest, LoadsCanonicalManifestAndOpcodeRegistry) {
 
 	ASSERT_TRUE(contract.tryParseOpcode("Ping").has_value());
 	EXPECT_EQ(ProtocolUnityOpcode::Ping, *contract.tryParseOpcode("Ping"));
+	ASSERT_TRUE(contract.tryParseOpcode("ReconnectRequest").has_value());
+	EXPECT_EQ(ProtocolUnityOpcode::ReconnectRequest, *contract.tryParseOpcode("ReconnectRequest"));
+	EXPECT_EQ(ProtocolUnityOpcode::SessionToken, requireVector("session_token_issue").opcode);
+	EXPECT_EQ(ProtocolUnityOpcode::ReconnectRequest, requireVector("reconnect_request_resume").opcode);
 	EXPECT_FALSE(contract.tryParseOpcode("NotRealOpcode").has_value());
 }
 

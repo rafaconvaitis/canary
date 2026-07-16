@@ -182,6 +182,10 @@ namespace {
 		}
 	}
 
+	[[nodiscard]] bool isProtocolUnityVisibleGroundItem(const std::shared_ptr<Item> &item) {
+		return item && !item->isRemoved() && item->isMovable();
+	}
+
 	[[nodiscard]] std::optional<ProtocolUnityCharacterSummary> loadProtocolUnityCharacterSummary(const std::string &characterName) {
 		auto player = std::make_shared<Player>(std::shared_ptr<ProtocolGame> {});
 		player->setName(characterName);
@@ -1041,7 +1045,7 @@ std::vector<std::vector<uint8_t>> ProtocolUnity::buildPendingWorldBootstrapFrame
 			}
 
 			for (const auto &item : *items) {
-				if (!item || item->isRemoved()) {
+				if (!isProtocolUnityVisibleGroundItem(item)) {
 					continue;
 				}
 
@@ -1560,7 +1564,7 @@ void ProtocolUnity::syncVisibleGroundItems() {
 			}
 
 			for (const auto &item : *items) {
-				if (!item || item->isRemoved()) {
+				if (!isProtocolUnityVisibleGroundItem(item)) {
 					continue;
 				}
 
