@@ -58,8 +58,8 @@ TEST(ProtocolUnityContractTest, LoadsCanonicalManifestAndOpcodeRegistry) {
 	EXPECT_EQ(4u, contract.framePrefixBytes);
 	EXPECT_EQ(65535u, contract.maximumPacketSize);
 	EXPECT_EQ(1024, contract.maximumStringLength);
-	EXPECT_EQ(34u, contract.opcodes.size());
-	EXPECT_EQ(8u, contract.vectors.size());
+	EXPECT_EQ(36u, contract.opcodes.size());
+	EXPECT_EQ(10u, contract.vectors.size());
 	EXPECT_EQ(2u, contract.negativeVectors.size());
 
 	const auto &clientHello = contract.requireOpcode(ProtocolUnityOpcode::ClientHello);
@@ -138,6 +138,32 @@ TEST(ProtocolUnityPacketReaderTest, ReadsDeterministicPositiveVectors) {
 	}
 
 	{
+		const auto &vector = requireVector("defend_request_enter");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
+		const auto &vector = requireVector("defense_result_blocked");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(77u, reader.readU32());
+		EXPECT_EQ(4, reader.readByte());
+		EXPECT_EQ(24, reader.readI16());
+		EXPECT_EQ(0, reader.readI16());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ("blocked", reader.readString());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
 		const auto &vector = requireVector("ping_ticks");
 		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
 		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
@@ -192,6 +218,28 @@ TEST(ProtocolUnityPacketWriterTest, RebuildsDeterministicPositiveVectors) {
 		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::MovementRequest);
 		writer.writeU32(42);
 		writer.writeByte(2);
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("defend_request_enter");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::DefendRequest);
+		writer.writeU32(42);
+		writer.writeByte(1);
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("defense_result_blocked");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::DefenseResult);
+		writer.writeU32(42);
+		writer.writeU32(77);
+		writer.writeByte(4);
+		writer.writeI16(24);
+		writer.writeI16(0);
+		writer.writeByte(1);
+		writer.writeByte(1);
+		writer.writeString("blocked");
 		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
 	}
 

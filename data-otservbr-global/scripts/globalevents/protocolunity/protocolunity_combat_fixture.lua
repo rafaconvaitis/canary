@@ -487,6 +487,9 @@ local function spawnAuxiliaryCreatures(fixture)
 
 			if creature then
 				local keepPassive = keepAllPassiveForSoak or definition.name ~= "Golden Moss Beast"
+				if definition.name == "Golden Moss Beast" then
+					creature:setMoveLocked(true)
+				end
 				if keepPassive then
 					if keepAllPassiveForSoak and anchorPlayer then
 						creature:setMaster(anchorPlayer)

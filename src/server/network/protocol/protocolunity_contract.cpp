@@ -68,6 +68,13 @@ namespace {
 	}
 
 	[[nodiscard]] ProtocolUnityOpcode parseOpcodeName(std::string_view opcodeName) {
+		if (opcodeName == "DefendRequest") {
+			return ProtocolUnityOpcode::DefendRequest;
+		}
+		if (opcodeName == "DefenseResult") {
+			return ProtocolUnityOpcode::DefenseResult;
+		}
+
 		const auto opcode = magic_enum::enum_cast<ProtocolUnityOpcode>(opcodeName);
 		if (!opcode.has_value()) {
 			throw ProtocolUnityException(fmt::format("Unknown ProtocolUnity opcode name '{}'.", opcodeName));

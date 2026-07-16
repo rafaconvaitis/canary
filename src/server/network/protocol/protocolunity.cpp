@@ -46,6 +46,7 @@
 
 namespace {
 	constexpr uint8_t PROTOCOL_UNITY_CAPABILITY_STRUCTURED_ERRORS = 1U << 0;
+	constexpr uint8_t PROTOCOL_UNITY_CAPABILITY_DEFENSE_RESULTS = 1U << 1;
 	constexpr uint32_t PROTOCOL_UNITY_DISCONNECT_VIOLATION_THRESHOLD = 3;
 	std::mutex protocolUnityGroundItemIdMutex {};
 	std::unordered_map<const Item*, uint32_t> protocolUnityGroundItemIds {};
@@ -263,7 +264,8 @@ ProtocolUnitySession::ProtocolUnitySession(
 	EnterWorldHandler initEnterWorldHandler,
 	MovementHandler initMovementHandler,
 	AttackHandler initAttackHandler,
-	PickupHandler initPickupHandler
+	PickupHandler initPickupHandler,
+	DefenseHandler initDefenseHandler
 ) :
 	contract(initContract),
 	serverName(std::move(initServerName)),
@@ -273,7 +275,8 @@ ProtocolUnitySession::ProtocolUnitySession(
 	enterWorldHandler(std::move(initEnterWorldHandler)),
 	movementHandler(std::move(initMovementHandler)),
 	attackHandler(std::move(initAttackHandler)),
-	pickupHandler(std::move(initPickupHandler)) {
+	pickupHandler(std::move(initPickupHandler)),
+	defenseHandler(std::move(initDefenseHandler)) {
 	transitionTo(ProtocolUnitySessionState::AwaitingHello);
 }
 
@@ -299,6 +302,10 @@ uint32_t ProtocolUnitySession::getAuthenticatedAccountId() const {
 
 const std::vector<ProtocolUnityCharacterSummary> &ProtocolUnitySession::getCharacters() const {
 	return characters;
+}
+
+bool ProtocolUnitySession::supportsClientCapability(uint8_t capability) const {
+	return (clientCapabilities & supportedCapabilities & capability) == capability;
 }
 
 ProtocolUnitySessionAction ProtocolUnitySession::handleFrame(std::span<const uint8_t> frameBytes) {
@@ -340,6 +347,11 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleDecodedFrame(const Protoc
 				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
 			}
 			return handleAttackRequest(frame.payload);
+		case ProtocolUnityOpcode::DefendRequest:
+			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
+				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
+			}
+			return handleDefendRequest(frame.payload);
 		case ProtocolUnityOpcode::PickupItemRequest:
 			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
 				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
@@ -466,6 +478,26 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleAttackRequest(std::span<c
 	const auto targetId = reader.readU32();
 	reader.expectFullyConsumed();
 	return attackHandler(actorId, targetId);
+}
+
+ProtocolUnitySessionAction ProtocolUnitySession::handleDefendRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "DefendRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!supportsClientCapability(PROTOCOL_UNITY_CAPABILITY_DEFENSE_RESULTS)) {
+		return reject("capability_required", "DefendRequest requires negotiated defense results.", true, false);
+	}
+
+	if (!defenseHandler) {
+		return reject("defense_unavailable", "ProtocolUnity defense is not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto active = reader.readByte() != 0;
+	reader.expectFullyConsumed();
+	return defenseHandler(actorId, active);
 }
 
 ProtocolUnitySessionAction ProtocolUnitySession::handlePickupItemRequest(std::span<const uint8_t> payload) {
@@ -818,6 +850,70 @@ void ProtocolUnity::onPlayerCombatResult(const std::shared_ptr<const Player> &vi
 	));
 }
 
+void ProtocolUnity::onPlayerDefenseStanceChanged(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &defender, bool active) {
+	if (!activePlayer || !viewer || !defender || viewer != activePlayer || !getSession().supportsClientCapability(PROTOCOL_UNITY_CAPABILITY_DEFENSE_RESULTS)) {
+		return;
+	}
+
+	sendRawFrame(buildDefenseResultFrame(
+		defender->getID(),
+		0,
+		active ? 1 : 2,
+		0,
+		0,
+		active,
+		true,
+		active ? "defense_entered" : "defense_exited"
+	));
+}
+
+void ProtocolUnity::onPlayerDefenseImpact(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &defender, uint8_t blockType, int32_t incomingDamage, int32_t appliedDamage) {
+	if (!activePlayer || !viewer || !defender || viewer != activePlayer || !getSession().supportsClientCapability(PROTOCOL_UNITY_CAPABILITY_DEFENSE_RESULTS)) {
+		return;
+	}
+
+	uint8_t outcome = 3;
+	std::string_view reason = "hit";
+	switch (static_cast<BlockType_t>(blockType)) {
+		case BLOCK_DEFENSE:
+			outcome = 4;
+			reason = "blocked";
+			break;
+		case BLOCK_ARMOR:
+			outcome = 5;
+			reason = "armor";
+			break;
+		case BLOCK_IMMUNITY:
+			outcome = 6;
+			reason = "immune";
+			break;
+		case BLOCK_DODGE:
+			outcome = 7;
+			reason = "dodged";
+			break;
+		case BLOCK_NONE:
+		default:
+			if (appliedDamage < incomingDamage) {
+				outcome = 8;
+				reason = "reduced_damage";
+			}
+			break;
+	}
+
+	const auto &defenderPlayer = defender->getPlayer();
+	const bool defendActive = defenderPlayer && defenderPlayer->getFightMode() == FIGHTMODE_DEFENSE;
+	sendRawFrame(buildDefenseResultFrame(
+		defender->getID(),
+		attacker ? attacker->getID() : 0,
+		outcome,
+		clampToI16(incomingDamage),
+		clampToI16(appliedDamage),
+		defendActive,
+		true,
+		reason
+	));
+}
+
 void ProtocolUnity::processFrame(NetworkMessage &msg) {
 	try {
 		auto &activeSession = getSession();
@@ -856,8 +952,14 @@ void ProtocolUnity::cleanupActivePlayer() {
 	pendingMovement.reset();
 
 	if (!activePlayer) {
+		previousFightMode.reset();
 		return;
 	}
+
+	if (previousFightMode.has_value() && activePlayer->getFightMode() == FIGHTMODE_DEFENSE) {
+		activePlayer->setFightMode(static_cast<FightMode_t>(*previousFightMode));
+	}
+	previousFightMode.reset();
 
 	activePlayer->clearProtocolObserver();
 
@@ -1209,6 +1311,19 @@ std::vector<uint8_t> ProtocolUnity::buildCombatResultFrame(uint32_t attackerId, 
 	return writer.finalize();
 }
 
+std::vector<uint8_t> ProtocolUnity::buildDefenseResultFrame(uint32_t defenderId, uint32_t attackerId, uint8_t outcome, int16_t incomingDamage, int16_t appliedDamage, bool defendActive, bool accepted, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::DefenseResult);
+	writer.writeU32(defenderId);
+	writer.writeU32(attackerId);
+	writer.writeByte(outcome);
+	writer.writeI16(incomingDamage);
+	writer.writeI16(appliedDamage);
+	writer.writeByte(defendActive ? 1 : 0);
+	writer.writeByte(accepted ? 1 : 0);
+	writer.writeString(reason);
+	return writer.finalize();
+}
+
 ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uint8_t direction) {
 	ProtocolUnitySessionAction action;
 	if (!activePlayer || activePlayer->isRemoved()) {
@@ -1295,6 +1410,40 @@ ProtocolUnitySessionAction ProtocolUnity::attackTarget(uint32_t actorId, uint32_
 		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, targetHealth, false, false, "target_not_visible"));
 	}
 
+	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::defendActivePlayer(uint32_t actorId, bool active) {
+	ProtocolUnitySessionAction action;
+	auto rejectDefense = [&](std::string_view reason) {
+		const bool defendActive = activePlayer && activePlayer->getFightMode() == FIGHTMODE_DEFENSE;
+		action.outboundFrames.emplace_back(buildDefenseResultFrame(actorId, 0, 255, 0, 0, defendActive, false, reason));
+	};
+
+	if (!activePlayer || activePlayer->isRemoved()) {
+		rejectDefense("player_unavailable");
+		return action;
+	}
+
+	if (activePlayer->getID() != actorId) {
+		rejectDefense("actor_mismatch");
+		return action;
+	}
+
+	if (active) {
+		if (activePlayer->getFightMode() != FIGHTMODE_DEFENSE) {
+			previousFightMode = static_cast<uint8_t>(activePlayer->getFightMode());
+			activePlayer->setFightMode(FIGHTMODE_DEFENSE);
+		}
+	} else if (activePlayer->getFightMode() == FIGHTMODE_DEFENSE) {
+		const auto restoredMode = previousFightMode.has_value()
+			? static_cast<FightMode_t>(*previousFightMode)
+			: FIGHTMODE_ATTACK;
+		activePlayer->setFightMode(restoredMode == FIGHTMODE_DEFENSE ? FIGHTMODE_ATTACK : restoredMode);
+		previousFightMode.reset();
+	}
+
+	activePlayer->notifyProtocolDefenseStanceChanged(activePlayer->getFightMode() == FIGHTMODE_DEFENSE);
 	return action;
 }
 
@@ -1610,7 +1759,7 @@ ProtocolUnitySession &ProtocolUnity::getSession() {
 			contract,
 			getAdvertisedServerName(),
 			advertisedLimit,
-			PROTOCOL_UNITY_CAPABILITY_STRUCTURED_ERRORS,
+			PROTOCOL_UNITY_CAPABILITY_STRUCTURED_ERRORS | PROTOCOL_UNITY_CAPABILITY_DEFENSE_RESULTS,
 			[](std::string_view accountDescriptor, std::string_view secret) {
 				return authenticateProtocolUnityAccount(accountDescriptor, secret);
 			},
@@ -1625,6 +1774,9 @@ ProtocolUnitySession &ProtocolUnity::getSession() {
 			},
 			[this](uint32_t actorId, uint32_t itemInstanceId) {
 				return pickupGroundItem(actorId, itemInstanceId);
+			},
+			[this](uint32_t actorId, bool active) {
+				return defendActivePlayer(actorId, active);
 			}
 		);
 	}

@@ -46,6 +46,8 @@ enum class ProtocolUnityOpcode : uint16_t {
 	MovementResult = 0x0031,
 	AttackRequest = 0x0032,
 	CombatResult = 0x0033,
+	DefendRequest = 0x0034,
+	DefenseResult = 0x0035,
 	ItemSpawn = 0x0040,
 	ItemRemove = 0x0041,
 	PickupItemRequest = 0x0042,

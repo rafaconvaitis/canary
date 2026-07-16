@@ -62,10 +62,21 @@ namespace {
 		ProtocolUnitySession::LoginHandler loginHandler,
 		ProtocolUnitySession::EnterWorldHandler enterWorldHandler = {},
 		ProtocolUnitySession::MovementHandler movementHandler = {},
-		ProtocolUnitySession::AttackHandler attackHandler = {}
+		ProtocolUnitySession::AttackHandler attackHandler = {},
+		ProtocolUnitySession::PickupHandler pickupHandler = {},
+		ProtocolUnitySession::DefenseHandler defenseHandler = {},
+		uint8_t supportedCapabilities = 1
 	) {
 		const auto &contract = getProtocolUnityContract();
-		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, 1, std::move(loginHandler), std::move(enterWorldHandler), std::move(movementHandler), std::move(attackHandler));
+		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, supportedCapabilities, std::move(loginHandler), std::move(enterWorldHandler), std::move(movementHandler), std::move(attackHandler), std::move(pickupHandler), std::move(defenseHandler));
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildClientHelloFrame(uint8_t capabilities) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::ClientHello);
+		writer.writeString("TibiaUnity");
+		writer.writeString("0.4.8");
+		writer.writeByte(capabilities);
+		return writer.finalize();
 	}
 
 	[[nodiscard]] std::vector<uint8_t> buildLoginRequestFrame(std::string_view accountDescriptor, std::string_view secret) {
@@ -92,6 +103,13 @@ namespace {
 		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::AttackRequest);
 		writer.writeU32(actorId);
 		writer.writeU32(targetId);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildDefendRequestFrame(uint32_t actorId, bool active) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::DefendRequest);
+		writer.writeU32(actorId);
+		writer.writeByte(active ? 1 : 0);
 		return writer.finalize();
 	}
 
@@ -487,6 +505,69 @@ TEST(ProtocolUnitySessionTest, AttackRequestInWorldDispatchesAttackHandler) {
 	EXPECT_EQ(0, reader.readByte());
 	EXPECT_EQ(1, reader.readByte());
 	EXPECT_EQ("hit", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, DefendRequestRequiresCapabilityAndDispatchesAuthoritativeHandler) {
+	bool defenseHandlerCalled = false;
+	auto session = makeSession(
+		[](std::string_view, std::string_view) {
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+			};
+			return response;
+		},
+		[](uint32_t, uint32_t) {
+			ProtocolUnityEnterWorldResponse response;
+			response.success = true;
+			response.selectionAccepted = true;
+			response.actorId = 1100;
+			return response;
+		},
+		{},
+		{},
+		{},
+		[&defenseHandlerCalled](uint32_t actorId, bool active) {
+			defenseHandlerCalled = true;
+			EXPECT_EQ(1100U, actorId);
+			EXPECT_TRUE(active);
+			ProtocolUnitySessionAction action;
+			ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::DefenseResult);
+			writer.writeU32(actorId);
+			writer.writeU32(0);
+			writer.writeByte(1);
+			writer.writeI16(0);
+			writer.writeI16(0);
+			writer.writeByte(1);
+			writer.writeByte(1);
+			writer.writeString("defense_entered");
+			action.outboundFrames.emplace_back(writer.finalize());
+			return action;
+		},
+		3
+	);
+
+	(void)session.handleFrame(buildClientHelloFrame(3));
+	(void)session.handleFrame(buildLoginRequestFrame("dev.alpha", "plain-secret"));
+	(void)session.handleFrame(buildEnterWorldRequestFrame(11));
+	const auto action = session.handleFrame(buildDefendRequestFrame(1100, true));
+
+	ASSERT_TRUE(defenseHandlerCalled);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::DefenseResult, response.opcode);
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ(1100U, reader.readU32());
+	EXPECT_EQ(0U, reader.readU32());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ(0, reader.readI16());
+	EXPECT_EQ(0, reader.readI16());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ("defense_entered", reader.readString());
 	EXPECT_NO_THROW(reader.expectFullyConsumed());
 }
 

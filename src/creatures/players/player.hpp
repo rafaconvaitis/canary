@@ -406,6 +406,8 @@ public:
 	std::shared_ptr<ProtocolGame> getClient() const;
 	void setProtocolObserver(const std::shared_ptr<PlayerProtocolObserver> &observer);
 	void clearProtocolObserver();
+	void notifyProtocolDefenseStanceChanged(bool active);
+	void notifyProtocolDefenseImpact(const std::shared_ptr<Creature> &attacker, BlockType_t blockType, int32_t incomingDamage, int32_t appliedDamage);
 
 	bool hasSecureMode() const;
 
@@ -757,6 +759,9 @@ public:
 
 	void setChaseMode(bool mode);
 	void setFightMode(FightMode_t mode);
+	FightMode_t getFightMode() const {
+		return fightMode;
+	}
 	void setSecureMode(bool mode);
 
 	Faction_t getFaction() const override;
