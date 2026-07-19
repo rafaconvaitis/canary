@@ -74,6 +74,30 @@ namespace {
 		if (opcodeName == "DefenseResult") {
 			return ProtocolUnityOpcode::DefenseResult;
 		}
+		if (opcodeName == "TurnRequest") {
+			return ProtocolUnityOpcode::TurnRequest;
+		}
+		if (opcodeName == "TurnResult") {
+			return ProtocolUnityOpcode::TurnResult;
+		}
+		if (opcodeName == "FollowRequest") {
+			return ProtocolUnityOpcode::FollowRequest;
+		}
+		if (opcodeName == "FollowResult") {
+			return ProtocolUnityOpcode::FollowResult;
+		}
+		if (opcodeName == "FightModeRequest") {
+			return ProtocolUnityOpcode::FightModeRequest;
+		}
+		if (opcodeName == "FightModeResult") {
+			return ProtocolUnityOpcode::FightModeResult;
+		}
+		if (opcodeName == "InteractionRequest") {
+			return ProtocolUnityOpcode::InteractionRequest;
+		}
+		if (opcodeName == "InteractionResult") {
+			return ProtocolUnityOpcode::InteractionResult;
+		}
 
 		const auto opcode = magic_enum::enum_cast<ProtocolUnityOpcode>(opcodeName);
 		if (!opcode.has_value()) {

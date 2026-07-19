@@ -131,6 +131,38 @@ struct ProtocolUnityGroundItemState {
 	uint16_t quantity = 0;
 };
 
+enum class ProtocolUnityWorldInteraction : uint8_t {
+	Look = 1,
+	Use = 2,
+	UseWith = 3,
+	UseOnSelf = 4,
+	UseOnTarget = 5,
+	UseAtCursor = 6,
+	Open = 7,
+	Close = 8,
+	Equip = 9,
+	Unequip = 10,
+	QuickLoot = 11,
+};
+
+enum class ProtocolUnityInteractionTargetKind : uint8_t {
+	None = 0,
+	Actor = 1,
+	GroundItem = 2,
+	InventorySlot = 3,
+	Tile = 4,
+	Cursor = 5,
+	Self = 6,
+};
+
+struct ProtocolUnityInteractionTarget {
+	ProtocolUnityInteractionTargetKind kind = ProtocolUnityInteractionTargetKind::None;
+	uint32_t entityId = 0;
+	int16_t slotIndex = -1;
+	uint16_t itemTypeId = 0;
+	ProtocolUnityWorldPosition position {};
+};
+
 struct ProtocolUnitySessionAction {
 	std::vector<std::vector<uint8_t>> outboundFrames {};
 	bool closeConnection = false;
@@ -144,6 +176,10 @@ public:
 	using AttackHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint32_t targetId)>;
 	using PickupHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint32_t itemInstanceId)>;
 	using DefenseHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, bool active)>;
+	using TurnHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint8_t direction)>;
+	using FollowHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint32_t targetId)>;
+	using FightModeHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint8_t mode, bool chase, bool safeFight)>;
+	using InteractionHandler = std::function<ProtocolUnitySessionAction(uint32_t actorId, uint8_t action, const ProtocolUnityInteractionTarget &source, const ProtocolUnityInteractionTarget &target)>;
 
 	ProtocolUnitySession(
 		const ProtocolUnityContract &initContract,
@@ -155,7 +191,11 @@ public:
 		MovementHandler initMovementHandler = {},
 		AttackHandler initAttackHandler = {},
 		PickupHandler initPickupHandler = {},
-		DefenseHandler initDefenseHandler = {}
+		DefenseHandler initDefenseHandler = {},
+		TurnHandler initTurnHandler = {},
+		FollowHandler initFollowHandler = {},
+		FightModeHandler initFightModeHandler = {},
+		InteractionHandler initInteractionHandler = {}
 	);
 
 	[[nodiscard]] ProtocolUnitySessionState getState() const;
@@ -176,7 +216,11 @@ private:
 	[[nodiscard]] ProtocolUnitySessionAction handleMovementRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleAttackRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handleDefendRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleTurnRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleFollowRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleFightModeRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handlePickupItemRequest(std::span<const uint8_t> payload);
+	[[nodiscard]] ProtocolUnitySessionAction handleInteractionRequest(std::span<const uint8_t> payload);
 	[[nodiscard]] ProtocolUnitySessionAction handlePing(std::span<const uint8_t> payload) const;
 	[[nodiscard]] ProtocolUnitySessionAction reject(std::string_view code, std::string_view detail, bool countViolation, bool closeConnection);
 	[[nodiscard]] std::vector<uint8_t> buildServerHelloFrame() const;
@@ -206,6 +250,10 @@ private:
 	AttackHandler attackHandler {};
 	PickupHandler pickupHandler {};
 	DefenseHandler defenseHandler {};
+	TurnHandler turnHandler {};
+	FollowHandler followHandler {};
+	FightModeHandler fightModeHandler {};
+	InteractionHandler interactionHandler {};
 };
 
 class ProtocolUnity final : public Protocol, public PlayerProtocolObserver {
@@ -268,10 +316,18 @@ private:
 	[[nodiscard]] std::vector<uint8_t> buildMovementResultFrame(uint32_t actorId, const ProtocolUnityWorldPosition &position, bool accepted, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildCombatResultFrame(uint32_t attackerId, uint32_t targetId, int16_t damage, uint16_t targetHealthAfterHit, bool targetDied, bool attackAccepted, std::string_view reason) const;
 	[[nodiscard]] std::vector<uint8_t> buildDefenseResultFrame(uint32_t defenderId, uint32_t attackerId, uint8_t outcome, int16_t incomingDamage, int16_t appliedDamage, bool defendActive, bool accepted, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildTurnResultFrame(uint32_t actorId, uint8_t direction, bool accepted, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildFollowResultFrame(uint32_t actorId, uint32_t targetId, bool active, bool accepted, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildFightModeResultFrame(uint32_t actorId, uint8_t mode, bool chase, bool safeFight, bool accepted, std::string_view reason) const;
+	[[nodiscard]] std::vector<uint8_t> buildInteractionResultFrame(uint32_t actorId, uint8_t action, bool accepted, std::string_view reason, bool active, uint32_t cooldownMilliseconds, uint16_t quantity, std::string_view feedback) const;
 	[[nodiscard]] ProtocolUnitySessionAction moveActivePlayer(uint32_t actorId, uint8_t direction);
 	[[nodiscard]] ProtocolUnitySessionAction attackTarget(uint32_t actorId, uint32_t targetId);
 	[[nodiscard]] ProtocolUnitySessionAction defendActivePlayer(uint32_t actorId, bool active);
+	[[nodiscard]] ProtocolUnitySessionAction turnActivePlayer(uint32_t actorId, uint8_t direction);
+	[[nodiscard]] ProtocolUnitySessionAction followActivePlayer(uint32_t actorId, uint32_t targetId);
+	[[nodiscard]] ProtocolUnitySessionAction setActivePlayerFightMode(uint32_t actorId, uint8_t mode, bool chase, bool safeFight);
 	[[nodiscard]] ProtocolUnitySessionAction pickupGroundItem(uint32_t actorId, uint32_t itemInstanceId);
+	[[nodiscard]] ProtocolUnitySessionAction performInteraction(uint32_t actorId, uint8_t action, const ProtocolUnityInteractionTarget &source, const ProtocolUnityInteractionTarget &target);
 	[[nodiscard]] ProtocolUnityActorState captureActorState(const std::shared_ptr<Creature> &creature) const;
 	[[nodiscard]] std::vector<ProtocolUnityInventorySlotState> captureInventorySnapshot() const;
 	[[nodiscard]] ProtocolUnityInventorySlotState captureInventorySlotState(uint8_t slotIndex, const std::shared_ptr<Item> &item) const;

@@ -183,6 +183,26 @@ namespace {
 		}
 	}
 
+	[[nodiscard]] uint8_t toProtocolUnityMovementDirection(
+		const ProtocolUnityWorldPosition &from,
+		const ProtocolUnityWorldPosition &to,
+		Direction fallback
+	) {
+		const auto deltaX = (to.x > from.x) - (to.x < from.x);
+		const auto deltaY = (to.y > from.y) - (to.y < from.y);
+		if (deltaX == 0 && deltaY == 0) {
+			return toProtocolUnityDirection(fallback);
+		}
+
+		if (deltaY < 0) {
+			return deltaX > 0 ? 1 : deltaX < 0 ? 7 : 0;
+		}
+		if (deltaY > 0) {
+			return deltaX > 0 ? 3 : deltaX < 0 ? 5 : 4;
+		}
+		return deltaX > 0 ? 2 : 6;
+	}
+
 	[[nodiscard]] bool isProtocolUnityVisibleGroundItem(const std::shared_ptr<Item> &item) {
 		return item && !item->isRemoved() && item->isMovable();
 	}
@@ -265,7 +285,11 @@ ProtocolUnitySession::ProtocolUnitySession(
 	MovementHandler initMovementHandler,
 	AttackHandler initAttackHandler,
 	PickupHandler initPickupHandler,
-	DefenseHandler initDefenseHandler
+	DefenseHandler initDefenseHandler,
+	TurnHandler initTurnHandler,
+	FollowHandler initFollowHandler,
+	FightModeHandler initFightModeHandler,
+	InteractionHandler initInteractionHandler
 ) :
 	contract(initContract),
 	serverName(std::move(initServerName)),
@@ -276,7 +300,11 @@ ProtocolUnitySession::ProtocolUnitySession(
 	movementHandler(std::move(initMovementHandler)),
 	attackHandler(std::move(initAttackHandler)),
 	pickupHandler(std::move(initPickupHandler)),
-	defenseHandler(std::move(initDefenseHandler)) {
+	defenseHandler(std::move(initDefenseHandler)),
+	turnHandler(std::move(initTurnHandler)),
+	followHandler(std::move(initFollowHandler)),
+	fightModeHandler(std::move(initFightModeHandler)),
+	interactionHandler(std::move(initInteractionHandler)) {
 	transitionTo(ProtocolUnitySessionState::AwaitingHello);
 }
 
@@ -352,11 +380,31 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleDecodedFrame(const Protoc
 				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
 			}
 			return handleDefendRequest(frame.payload);
+		case ProtocolUnityOpcode::TurnRequest:
+			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
+				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
+			}
+			return handleTurnRequest(frame.payload);
+		case ProtocolUnityOpcode::FollowRequest:
+			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
+				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
+			}
+			return handleFollowRequest(frame.payload);
+		case ProtocolUnityOpcode::FightModeRequest:
+			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
+				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
+			}
+			return handleFightModeRequest(frame.payload);
 		case ProtocolUnityOpcode::PickupItemRequest:
 			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
 				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
 			}
 			return handlePickupItemRequest(frame.payload);
+		case ProtocolUnityOpcode::InteractionRequest:
+			if (state == ProtocolUnitySessionState::AwaitingHello || state == ProtocolUnitySessionState::Connected) {
+				return reject("hello_required", "ClientHello must complete before gameplay requests.", true, false);
+			}
+			return handleInteractionRequest(frame.payload);
 		default:
 			return reject("unsupported_opcode", fmt::format("Opcode '{}' is not implemented yet.", contract.requireOpcode(frame.opcode).name), false, false);
 	}
@@ -500,6 +548,56 @@ ProtocolUnitySessionAction ProtocolUnitySession::handleDefendRequest(std::span<c
 	return defenseHandler(actorId, active);
 }
 
+ProtocolUnitySessionAction ProtocolUnitySession::handleTurnRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "TurnRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!turnHandler) {
+		return reject("turn_unavailable", "ProtocolUnity turning is not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto direction = reader.readByte();
+	reader.expectFullyConsumed();
+	return turnHandler(actorId, direction);
+}
+
+ProtocolUnitySessionAction ProtocolUnitySession::handleFollowRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "FollowRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!followHandler) {
+		return reject("follow_unavailable", "ProtocolUnity follow is not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto targetId = reader.readU32();
+	reader.expectFullyConsumed();
+	return followHandler(actorId, targetId);
+}
+
+ProtocolUnitySessionAction ProtocolUnitySession::handleFightModeRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "FightModeRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!fightModeHandler) {
+		return reject("fight_mode_unavailable", "ProtocolUnity fight modes are not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto mode = reader.readByte();
+	const auto chase = reader.readByte() != 0;
+	const auto safeFight = reader.readByte() != 0;
+	reader.expectFullyConsumed();
+	return fightModeHandler(actorId, mode, chase, safeFight);
+}
+
 ProtocolUnitySessionAction ProtocolUnitySession::handlePickupItemRequest(std::span<const uint8_t> payload) {
 	if (state != ProtocolUnitySessionState::InWorld) {
 		return reject("invalid_state", "PickupItemRequest is only valid after world entry succeeds.", true, false);
@@ -514,6 +612,44 @@ ProtocolUnitySessionAction ProtocolUnitySession::handlePickupItemRequest(std::sp
 	const auto itemInstanceId = reader.readU32();
 	reader.expectFullyConsumed();
 	return pickupHandler(actorId, itemInstanceId);
+}
+
+ProtocolUnitySessionAction ProtocolUnitySession::handleInteractionRequest(std::span<const uint8_t> payload) {
+	if (state != ProtocolUnitySessionState::InWorld) {
+		return reject("invalid_state", "InteractionRequest is only valid after world entry succeeds.", true, false);
+	}
+
+	if (!interactionHandler) {
+		return reject("interaction_unavailable", "ProtocolUnity interactions are not connected yet.", false, false);
+	}
+
+	ProtocolUnityPacketReader reader(payload, contract);
+	const auto actorId = reader.readU32();
+	const auto interaction = reader.readByte();
+	auto readTarget = [&reader]() {
+		ProtocolUnityInteractionTarget target;
+		target.kind = static_cast<ProtocolUnityInteractionTargetKind>(reader.readByte());
+		target.entityId = reader.readU32();
+		target.slotIndex = reader.readI16();
+		target.itemTypeId = reader.readU16();
+		target.position.x = reader.readI32();
+		target.position.y = reader.readI32();
+		target.position.floor = reader.readI32();
+		return target;
+	};
+	const auto source = readTarget();
+	const auto target = readTarget();
+	reader.expectFullyConsumed();
+
+	if (interaction < static_cast<uint8_t>(ProtocolUnityWorldInteraction::Look) || interaction > static_cast<uint8_t>(ProtocolUnityWorldInteraction::QuickLoot)) {
+		return reject("invalid_interaction", "Interaction action is outside the supported range.", true, false);
+	}
+	if (static_cast<uint8_t>(source.kind) > static_cast<uint8_t>(ProtocolUnityInteractionTargetKind::Self) ||
+	    static_cast<uint8_t>(target.kind) > static_cast<uint8_t>(ProtocolUnityInteractionTargetKind::Self)) {
+		return reject("invalid_interaction_target", "Interaction target kind is outside the supported range.", true, false);
+	}
+
+	return interactionHandler(actorId, interaction, source, target);
 }
 
 ProtocolUnitySessionAction ProtocolUnitySession::handlePing(std::span<const uint8_t> payload) const {
@@ -679,7 +815,10 @@ void ProtocolUnity::onPlayerCreatureMove(const std::shared_ptr<const Player> &vi
 
 	const auto fromPosition = captureViewportPosition(oldPos);
 	const auto toPosition = captureViewportPosition(newPos);
-	const auto direction = toProtocolUnityDirection(creature->getDirection());
+	const auto direction = toProtocolUnityMovementDirection(fromPosition, toPosition, creature->getDirection());
+	if (const auto authoritativeDirection = toCanaryDirection(direction)) {
+		creature->setDirection(*authoritativeDirection);
+	}
 	bool isAuthoritativeCorrection = false;
 
 	if (creature == activePlayer && pendingMovement.has_value() && pendingMovement->actorId == creature->getID()) {
@@ -1324,6 +1463,58 @@ std::vector<uint8_t> ProtocolUnity::buildDefenseResultFrame(uint32_t defenderId,
 	return writer.finalize();
 }
 
+std::vector<uint8_t> ProtocolUnity::buildTurnResultFrame(uint32_t actorId, uint8_t direction, bool accepted, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::TurnResult);
+	writer.writeU32(actorId);
+	writer.writeByte(direction);
+	writer.writeByte(accepted ? 1 : 0);
+	writer.writeString(reason);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildFollowResultFrame(uint32_t actorId, uint32_t targetId, bool active, bool accepted, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::FollowResult);
+	writer.writeU32(actorId);
+	writer.writeU32(targetId);
+	writer.writeByte(active ? 1 : 0);
+	writer.writeByte(accepted ? 1 : 0);
+	writer.writeString(reason);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildFightModeResultFrame(uint32_t actorId, uint8_t mode, bool chase, bool safeFight, bool accepted, std::string_view reason) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::FightModeResult);
+	writer.writeU32(actorId);
+	writer.writeByte(mode);
+	writer.writeByte(chase ? 1 : 0);
+	writer.writeByte(safeFight ? 1 : 0);
+	writer.writeByte(accepted ? 1 : 0);
+	writer.writeString(reason);
+	return writer.finalize();
+}
+
+std::vector<uint8_t> ProtocolUnity::buildInteractionResultFrame(
+	uint32_t actorId,
+	uint8_t interaction,
+	bool accepted,
+	std::string_view reason,
+	bool active,
+	uint32_t cooldownMilliseconds,
+	uint16_t quantity,
+	std::string_view feedback
+) const {
+	ProtocolUnityPacketWriter writer(getContract(), ProtocolUnityOpcode::InteractionResult);
+	writer.writeU32(actorId);
+	writer.writeByte(interaction);
+	writer.writeByte(accepted ? 1 : 0);
+	writer.writeString(reason);
+	writer.writeByte(active ? 1 : 0);
+	writer.writeU32(cooldownMilliseconds);
+	writer.writeU16(quantity);
+	writer.writeString(feedback);
+	return writer.finalize();
+}
+
 ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uint8_t direction) {
 	ProtocolUnitySessionAction action;
 	if (!activePlayer || activePlayer->isRemoved()) {
@@ -1345,6 +1536,12 @@ ProtocolUnitySessionAction ProtocolUnity::moveActivePlayer(uint32_t actorId, uin
 	if (pendingMovement.has_value()) {
 		action.outboundFrames.emplace_back(buildMovementResultFrame(actorId, captureViewportPosition(activePlayer->getPosition()), false, "movement_pending"));
 		return action;
+	}
+
+	if (const auto &followTarget = activePlayer->getFollowCreature()) {
+		const auto previousFollowId = followTarget->getID();
+		activePlayer->setFollowCreature(nullptr);
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, previousFollowId, false, true, "manual_movement"));
 	}
 
 	const auto requestedFromPosition = captureViewportPosition(activePlayer->getPosition());
@@ -1380,8 +1577,12 @@ ProtocolUnitySessionAction ProtocolUnity::attackTarget(uint32_t actorId, uint32_
 	}
 
 	if (targetId == 0) {
+		const auto previousFollow = activePlayer->getFollowCreature();
 		g_game().playerSetAttackedCreature(activePlayer->getID(), 0);
 		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, 0, 0, 0, false, true, "target_cleared"));
+		if (previousFollow && !activePlayer->getFollowCreature()) {
+			action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, previousFollow->getID(), false, true, "attack_stopped"));
+		}
 		return action;
 	}
 
@@ -1404,10 +1605,18 @@ ProtocolUnitySessionAction ProtocolUnity::attackTarget(uint32_t actorId, uint32_
 		return action;
 	}
 
+	const auto previousFollow = activePlayer->getFollowCreature();
 	g_game().playerSetAttackedCreature(activePlayer->getID(), targetId);
 	const auto updatedTarget = activePlayer->getAttackedCreature();
 	if (!updatedTarget || updatedTarget->getID() != targetId) {
 		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, targetId, 0, targetHealth, false, false, "target_not_visible"));
+	}
+
+	const auto updatedFollow = activePlayer->getFollowCreature();
+	const auto previousFollowId = previousFollow ? previousFollow->getID() : 0;
+	const auto updatedFollowId = updatedFollow ? updatedFollow->getID() : 0;
+	if (previousFollowId != updatedFollowId) {
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, updatedFollowId, updatedFollow != nullptr, true, updatedFollow ? "chase_target" : "attack_target"));
 	}
 
 	return action;
@@ -1444,6 +1653,118 @@ ProtocolUnitySessionAction ProtocolUnity::defendActivePlayer(uint32_t actorId, b
 	}
 
 	activePlayer->notifyProtocolDefenseStanceChanged(activePlayer->getFightMode() == FIGHTMODE_DEFENSE);
+	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::turnActivePlayer(uint32_t actorId, uint8_t direction) {
+	ProtocolUnitySessionAction action;
+	if (!activePlayer || activePlayer->isRemoved()) {
+		action.outboundFrames.emplace_back(buildTurnResultFrame(actorId, direction, false, "player_unavailable"));
+		return action;
+	}
+
+	if (activePlayer->getID() != actorId) {
+		action.outboundFrames.emplace_back(buildTurnResultFrame(actorId, toProtocolUnityDirection(activePlayer->getDirection()), false, "actor_mismatch"));
+		return action;
+	}
+
+	// ProtocolUnity permits eight movement directions, but turn-in-place is cardinal only.
+	if (direction > 6 || (direction & 1U) != 0) {
+		action.outboundFrames.emplace_back(buildTurnResultFrame(actorId, toProtocolUnityDirection(activePlayer->getDirection()), false, "invalid_turn_direction"));
+		return action;
+	}
+
+	const auto canaryDirection = toCanaryDirection(direction);
+	if (!canaryDirection.has_value()) {
+		action.outboundFrames.emplace_back(buildTurnResultFrame(actorId, toProtocolUnityDirection(activePlayer->getDirection()), false, "invalid_turn_direction"));
+		return action;
+	}
+
+	const auto previousDirection = activePlayer->getDirection();
+	if (previousDirection != *canaryDirection) {
+		g_game().playerTurn(activePlayer->getID(), *canaryDirection);
+	}
+
+	const auto authoritativeDirection = toProtocolUnityDirection(activePlayer->getDirection());
+	const bool accepted = activePlayer->getDirection() == *canaryDirection;
+	const auto reason = accepted
+		? (previousDirection == *canaryDirection ? "already_facing" : "turned")
+		: "turn_rejected";
+	action.outboundFrames.emplace_back(buildTurnResultFrame(actorId, authoritativeDirection, accepted, reason));
+	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::followActivePlayer(uint32_t actorId, uint32_t targetId) {
+	ProtocolUnitySessionAction action;
+	if (!activePlayer || activePlayer->isRemoved()) {
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, targetId, false, false, "player_unavailable"));
+		return action;
+	}
+
+	if (activePlayer->getID() != actorId) {
+		const auto currentTarget = activePlayer->getFollowCreature();
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, currentTarget ? currentTarget->getID() : 0, currentTarget != nullptr, false, "actor_mismatch"));
+		return action;
+	}
+
+	if (targetId == 0) {
+		const auto previousTarget = activePlayer->getFollowCreature();
+		activePlayer->setFollowCreature(nullptr);
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, previousTarget ? previousTarget->getID() : 0, false, true, previousTarget ? "follow_stopped" : "not_following"));
+		return action;
+	}
+
+	const auto &target = g_game().getCreatureByID(targetId);
+	if (!target || target->isRemoved()) {
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, targetId, false, false, "unknown_target"));
+		return action;
+	}
+
+	if (target == activePlayer) {
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, targetId, false, false, "cannot_follow_self"));
+		return action;
+	}
+
+	const auto previousAttack = activePlayer->getAttackedCreature();
+	g_game().playerFollowCreature(activePlayer->getID(), targetId);
+	const auto authoritativeTarget = activePlayer->getFollowCreature();
+	const bool accepted = authoritativeTarget && authoritativeTarget->getID() == targetId;
+	if (previousAttack && !activePlayer->getAttackedCreature()) {
+		action.outboundFrames.emplace_back(buildCombatResultFrame(actorId, 0, 0, 0, false, true, "follow_started"));
+	}
+	const auto authoritativeTargetId = authoritativeTarget ? authoritativeTarget->getID() : targetId;
+	action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, authoritativeTargetId, accepted, accepted, accepted ? "follow_started" : "follow_rejected"));
+	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::setActivePlayerFightMode(uint32_t actorId, uint8_t mode, bool chase, bool safeFight) {
+	ProtocolUnitySessionAction action;
+	if (!activePlayer || activePlayer->isRemoved()) {
+		action.outboundFrames.emplace_back(buildFightModeResultFrame(actorId, mode, chase, safeFight, false, "player_unavailable"));
+		return action;
+	}
+
+	if (activePlayer->getID() != actorId) {
+		action.outboundFrames.emplace_back(buildFightModeResultFrame(actorId, static_cast<uint8_t>(activePlayer->getFightMode()), chase, safeFight, false, "actor_mismatch"));
+		return action;
+	}
+
+	if (mode < static_cast<uint8_t>(FIGHTMODE_ATTACK) || mode > static_cast<uint8_t>(FIGHTMODE_DEFENSE)) {
+		action.outboundFrames.emplace_back(buildFightModeResultFrame(actorId, static_cast<uint8_t>(activePlayer->getFightMode()), chase, safeFight, false, "invalid_fight_mode"));
+		return action;
+	}
+
+	const auto previousFollow = activePlayer->getFollowCreature();
+	g_game().playerSetFightModes(activePlayer->getID(), static_cast<FightMode_t>(mode), chase, safeFight);
+	const auto authoritativeFollow = activePlayer->getFollowCreature();
+	const auto previousFollowId = previousFollow ? previousFollow->getID() : 0;
+	const auto authoritativeFollowId = authoritativeFollow ? authoritativeFollow->getID() : 0;
+	if (previousFollowId != authoritativeFollowId) {
+		action.outboundFrames.emplace_back(buildFollowResultFrame(actorId, authoritativeFollowId, authoritativeFollow != nullptr, true, authoritativeFollow ? "chase_enabled" : "chase_disabled"));
+	}
+
+	const bool accepted = activePlayer->getFightMode() == static_cast<FightMode_t>(mode);
+	action.outboundFrames.emplace_back(buildFightModeResultFrame(actorId, static_cast<uint8_t>(activePlayer->getFightMode()), chase, safeFight, accepted, accepted ? "fight_mode_updated" : "fight_mode_rejected"));
 	return action;
 }
 
@@ -1510,6 +1831,205 @@ ProtocolUnitySessionAction ProtocolUnity::pickupGroundItem(uint32_t actorId, uin
 	action.outboundFrames.emplace_back(buildPickupItemResultFrame(actorId, itemInstanceId, true, "picked_up"));
 	appendDeferredPickupFrames(action);
 	return action;
+}
+
+ProtocolUnitySessionAction ProtocolUnity::performInteraction(
+	uint32_t actorId,
+	uint8_t interactionValue,
+	const ProtocolUnityInteractionTarget &source,
+	const ProtocolUnityInteractionTarget &target
+) {
+	ProtocolUnitySessionAction action;
+	auto respond = [this, actorId, interactionValue, &action](
+		bool accepted,
+		std::string_view reason,
+		bool active = false,
+		uint32_t cooldownMilliseconds = 0,
+		uint16_t quantity = 0,
+		std::string_view feedback = ""
+	) -> ProtocolUnitySessionAction {
+		action.outboundFrames.emplace_back(buildInteractionResultFrame(
+			actorId,
+			interactionValue,
+			accepted,
+			reason,
+			active,
+			cooldownMilliseconds,
+			quantity,
+			feedback
+		));
+		return std::move(action);
+	};
+
+	if (!activePlayer || activePlayer->isRemoved()) {
+		return respond(false, "player_unavailable");
+	}
+	if (activePlayer->getID() != actorId) {
+		return respond(false, "actor_mismatch");
+	}
+
+	const auto interaction = static_cast<ProtocolUnityWorldInteraction>(interactionValue);
+	auto resolveItem = [this](const ProtocolUnityInteractionTarget &candidate) -> std::shared_ptr<Item> {
+		if (candidate.kind == ProtocolUnityInteractionTargetKind::InventorySlot) {
+			if (candidate.slotIndex < CONST_SLOT_FIRST || candidate.slotIndex > CONST_SLOT_LAST) {
+				return nullptr;
+			}
+			const auto item = activePlayer->getInventoryItem(static_cast<Slots_t>(candidate.slotIndex));
+			if (!item || (candidate.itemTypeId != 0 && item->getID() != candidate.itemTypeId)) {
+				return nullptr;
+			}
+			return item;
+		}
+
+		if (candidate.kind == ProtocolUnityInteractionTargetKind::GroundItem) {
+			const auto iterator = visibleGroundItemsByInstanceId.find(candidate.entityId);
+			const auto item = iterator != visibleGroundItemsByInstanceId.end() ? iterator->second.lock() : nullptr;
+			if (!item || item->isRemoved() || (candidate.itemTypeId != 0 && item->getID() != candidate.itemTypeId)) {
+				return nullptr;
+			}
+			return item;
+		}
+
+		return nullptr;
+	};
+
+	auto resolveCreature = [](const ProtocolUnityInteractionTarget &candidate) -> std::shared_ptr<Creature> {
+		if (candidate.kind != ProtocolUnityInteractionTargetKind::Actor && candidate.kind != ProtocolUnityInteractionTargetKind::Self) {
+			return nullptr;
+		}
+		return g_game().getCreatureByID(candidate.entityId);
+	};
+
+	auto resolveLocalPosition = [this](const ProtocolUnityInteractionTarget &candidate) -> std::optional<Position> {
+		if (candidate.kind != ProtocolUnityInteractionTargetKind::Tile && candidate.kind != ProtocolUnityInteractionTargetKind::Cursor) {
+			return std::nullopt;
+		}
+		const auto worldX = snapshotOrigin.x + candidate.position.x;
+		const auto worldY = snapshotOrigin.y + candidate.position.y;
+		const auto worldFloor = candidate.position.floor;
+		if (worldX < 0 || worldY < 0 || worldFloor < 0 ||
+		    worldX > std::numeric_limits<uint16_t>::max() ||
+		    worldY > std::numeric_limits<uint16_t>::max() ||
+		    worldFloor > std::numeric_limits<uint8_t>::max()) {
+			return std::nullopt;
+		}
+		return Position(
+			static_cast<uint16_t>(worldX),
+			static_cast<uint16_t>(worldY),
+			static_cast<uint8_t>(worldFloor)
+		);
+	};
+
+	const ProtocolUnityInteractionTarget &primary = source.kind != ProtocolUnityInteractionTargetKind::None ? source : target;
+	if (interaction == ProtocolUnityWorldInteraction::Close) {
+		return respond(false, "container_id_unavailable");
+	}
+
+	if (interaction == ProtocolUnityWorldInteraction::Look) {
+		if (const auto creature = resolveCreature(target); creature && activePlayer->canSeeCreature(creature)) {
+			g_game().playerLookInBattleList(actorId, creature->getID());
+			return respond(true, "look_complete", false, 0, 1, creature->getName());
+		}
+
+		if (const auto item = resolveItem(target)) {
+			Position itemPosition;
+			uint8_t stackPosition = 0;
+			g_game().internalGetPosition(item, itemPosition, stackPosition);
+			g_game().playerLookAt(actorId, item->getID(), itemPosition, stackPosition);
+			const auto quantity = static_cast<uint16_t>(item->isStackable() ? item->getItemCount() : 1);
+			return respond(true, "look_complete", false, 0, quantity, item->getName());
+		}
+
+		if (const auto position = resolveLocalPosition(target); position.has_value() && activePlayer->canSee(*position)) {
+			g_game().playerLookAt(actorId, 0, *position, 0);
+			return respond(true, "look_complete", false, 0, 1, "ground");
+		}
+		return respond(false, "target_unavailable");
+	}
+
+	if (interaction == ProtocolUnityWorldInteraction::QuickLoot) {
+		const auto item = resolveItem(target);
+		if (!item) {
+			return respond(false, "item_unavailable");
+		}
+		Position itemPosition;
+		uint8_t stackPosition = 0;
+		g_game().internalGetPosition(item, itemPosition, stackPosition);
+		if (item->getContainer()) {
+			g_game().playerQuickLoot(actorId, itemPosition, item->getID(), stackPosition, item);
+			return respond(true, "quick_loot_dispatched", false, 250, 0, item->getName());
+		}
+
+		const auto originalParent = item->getParent();
+		action = pickupGroundItem(actorId, target.entityId);
+		const bool accepted = item->isRemoved() || item->getParent() != originalParent;
+		return respond(accepted, accepted ? "quick_loot_complete" : "quick_loot_failed", false, 250, 0, item->getName());
+	}
+
+	const auto sourceItem = resolveItem(primary);
+	if (!sourceItem) {
+		return respond(false, "source_item_unavailable");
+	}
+	const auto quantity = static_cast<uint16_t>(sourceItem->isStackable() ? sourceItem->getItemCount() : 1);
+	Position sourcePosition;
+	uint8_t sourceStackPosition = 0;
+	g_game().internalGetPosition(sourceItem, sourcePosition, sourceStackPosition);
+
+	if (interaction == ProtocolUnityWorldInteraction::Open) {
+		if (!sourceItem->getContainer()) {
+			return respond(false, "item_not_container", false, 0, quantity, sourceItem->getName());
+		}
+		g_game().playerUseItem(actorId, sourcePosition, sourceStackPosition, 0, sourceItem->getID());
+		return respond(true, "container_open_dispatched", true, 250, quantity, sourceItem->getName());
+	}
+
+	if (interaction == ProtocolUnityWorldInteraction::Equip || interaction == ProtocolUnityWorldInteraction::Unequip) {
+		g_game().playerEquipItem(actorId, sourceItem->getID(), sourceItem->getTier() > 0, sourceItem->getTier());
+		return respond(
+			true,
+			interaction == ProtocolUnityWorldInteraction::Equip ? "equip_dispatched" : "unequip_dispatched",
+			interaction == ProtocolUnityWorldInteraction::Equip,
+			600,
+			quantity,
+			sourceItem->getName()
+		);
+	}
+
+	if (interaction == ProtocolUnityWorldInteraction::UseOnSelf ||
+	    interaction == ProtocolUnityWorldInteraction::UseOnTarget ||
+	    (interaction == ProtocolUnityWorldInteraction::UseWith &&
+	     (target.kind == ProtocolUnityInteractionTargetKind::Actor || target.kind == ProtocolUnityInteractionTargetKind::Self))) {
+		const auto creature = resolveCreature(target);
+		if (!creature || !activePlayer->canSeeCreature(creature)) {
+			return respond(false, "target_unavailable", false, 0, quantity, sourceItem->getName());
+		}
+		g_game().playerUseWithCreature(actorId, sourcePosition, sourceStackPosition, creature->getID(), sourceItem->getID());
+		return respond(true, "interaction_dispatched", false, 800, quantity, sourceItem->getName());
+	}
+
+	if (interaction == ProtocolUnityWorldInteraction::UseAtCursor || interaction == ProtocolUnityWorldInteraction::UseWith) {
+		std::optional<Position> targetPosition = resolveLocalPosition(target);
+		uint8_t targetStackPosition = 0;
+		uint16_t targetItemId = 0;
+		if (const auto targetItem = resolveItem(target)) {
+			Position itemPosition;
+			g_game().internalGetPosition(targetItem, itemPosition, targetStackPosition);
+			targetPosition = itemPosition;
+			targetItemId = targetItem->getID();
+		}
+		if (!targetPosition.has_value() || !activePlayer->canSee(*targetPosition)) {
+			return respond(false, "target_unavailable", false, 0, quantity, sourceItem->getName());
+		}
+		g_game().playerUseItemEx(actorId, sourcePosition, sourceStackPosition, sourceItem->getID(), *targetPosition, targetStackPosition, targetItemId);
+		return respond(true, "interaction_dispatched", false, 800, quantity, sourceItem->getName());
+	}
+
+	if (interaction == ProtocolUnityWorldInteraction::Use) {
+		g_game().playerUseItem(actorId, sourcePosition, sourceStackPosition, 0, sourceItem->getID());
+		return respond(true, "interaction_dispatched", false, 800, quantity, sourceItem->getName());
+	}
+
+	return respond(false, "unsupported_interaction");
 }
 
 ProtocolUnityActorState ProtocolUnity::captureActorState(const std::shared_ptr<Creature> &creature) const {
@@ -1777,6 +2297,18 @@ ProtocolUnitySession &ProtocolUnity::getSession() {
 			},
 			[this](uint32_t actorId, bool active) {
 				return defendActivePlayer(actorId, active);
+			},
+			[this](uint32_t actorId, uint8_t direction) {
+				return turnActivePlayer(actorId, direction);
+			},
+			[this](uint32_t actorId, uint32_t targetId) {
+				return followActivePlayer(actorId, targetId);
+			},
+			[this](uint32_t actorId, uint8_t mode, bool chase, bool safeFight) {
+				return setActivePlayerFightMode(actorId, mode, chase, safeFight);
+			},
+			[this](uint32_t actorId, uint8_t interaction, const ProtocolUnityInteractionTarget &source, const ProtocolUnityInteractionTarget &target) {
+				return performInteraction(actorId, interaction, source, target);
 			}
 		);
 	}

@@ -58,8 +58,8 @@ TEST(ProtocolUnityContractTest, LoadsCanonicalManifestAndOpcodeRegistry) {
 	EXPECT_EQ(4u, contract.framePrefixBytes);
 	EXPECT_EQ(65535u, contract.maximumPacketSize);
 	EXPECT_EQ(1024, contract.maximumStringLength);
-	EXPECT_EQ(36u, contract.opcodes.size());
-	EXPECT_EQ(10u, contract.vectors.size());
+	EXPECT_EQ(44u, contract.opcodes.size());
+	EXPECT_EQ(18u, contract.vectors.size());
 	EXPECT_EQ(2u, contract.negativeVectors.size());
 
 	const auto &clientHello = contract.requireOpcode(ProtocolUnityOpcode::ClientHello);
@@ -74,8 +74,11 @@ TEST(ProtocolUnityContractTest, LoadsCanonicalManifestAndOpcodeRegistry) {
 	EXPECT_EQ(ProtocolUnityOpcode::Ping, *contract.tryParseOpcode("Ping"));
 	ASSERT_TRUE(contract.tryParseOpcode("ReconnectRequest").has_value());
 	EXPECT_EQ(ProtocolUnityOpcode::ReconnectRequest, *contract.tryParseOpcode("ReconnectRequest"));
+	ASSERT_TRUE(contract.tryParseOpcode("InteractionRequest").has_value());
+	EXPECT_EQ(ProtocolUnityOpcode::InteractionRequest, *contract.tryParseOpcode("InteractionRequest"));
 	EXPECT_EQ(ProtocolUnityOpcode::SessionToken, requireVector("session_token_issue").opcode);
 	EXPECT_EQ(ProtocolUnityOpcode::ReconnectRequest, requireVector("reconnect_request_resume").opcode);
+	EXPECT_EQ(ProtocolUnityOpcode::InteractionResult, requireVector("interaction_result_use_with").opcode);
 	EXPECT_FALSE(contract.tryParseOpcode("NotRealOpcode").has_value());
 }
 
@@ -164,6 +167,77 @@ TEST(ProtocolUnityPacketReaderTest, ReadsDeterministicPositiveVectors) {
 	}
 
 	{
+		const auto &vector = requireVector("turn_request_north");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(0, reader.readByte());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
+		const auto &vector = requireVector("turn_result_north");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(0, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ("turned", reader.readString());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
+		const auto &vector = requireVector("follow_request_target");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(77u, reader.readU32());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
+		const auto &vector = requireVector("follow_result_active");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(77u, reader.readU32());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ("follow_started", reader.readString());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
+		const auto &vector = requireVector("fight_mode_request_balanced");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(2, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
+		const auto &vector = requireVector("fight_mode_result_balanced");
+		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
+		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
+		ProtocolUnityPacketReader reader(frame.payload, contract);
+		EXPECT_EQ(42u, reader.readU32());
+		EXPECT_EQ(2, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ(1, reader.readByte());
+		EXPECT_EQ("fight_mode_updated", reader.readString());
+		EXPECT_NO_THROW(reader.expectFullyConsumed());
+	}
+
+	{
 		const auto &vector = requireVector("ping_ticks");
 		const auto bytes = ProtocolUnityContract::decodeHex(vector.frameHex);
 		const auto frame = ProtocolUnityFrameCodec::decode(bytes, contract);
@@ -240,6 +314,101 @@ TEST(ProtocolUnityPacketWriterTest, RebuildsDeterministicPositiveVectors) {
 		writer.writeByte(1);
 		writer.writeByte(1);
 		writer.writeString("blocked");
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("turn_request_north");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::TurnRequest);
+		writer.writeU32(42);
+		writer.writeByte(0);
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("turn_result_north");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::TurnResult);
+		writer.writeU32(42);
+		writer.writeByte(0);
+		writer.writeByte(1);
+		writer.writeString("turned");
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("follow_request_target");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::FollowRequest);
+		writer.writeU32(42);
+		writer.writeU32(77);
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("follow_result_active");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::FollowResult);
+		writer.writeU32(42);
+		writer.writeU32(77);
+		writer.writeByte(1);
+		writer.writeByte(1);
+		writer.writeString("follow_started");
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("fight_mode_request_balanced");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::FightModeRequest);
+		writer.writeU32(42);
+		writer.writeByte(2);
+		writer.writeByte(1);
+		writer.writeByte(1);
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("fight_mode_result_balanced");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::FightModeResult);
+		writer.writeU32(42);
+		writer.writeByte(2);
+		writer.writeByte(1);
+		writer.writeByte(1);
+		writer.writeByte(1);
+		writer.writeString("fight_mode_updated");
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("interaction_request_use_with");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::InteractionRequest);
+		writer.writeU32(42);
+		writer.writeByte(3);
+		writer.writeByte(3);
+		writer.writeU32(0);
+		writer.writeI16(11);
+		writer.writeU16(3155);
+		writer.writeI32(0);
+		writer.writeI32(0);
+		writer.writeI32(0);
+		writer.writeByte(1);
+		writer.writeU32(77);
+		writer.writeI16(-1);
+		writer.writeU16(0);
+		writer.writeI32(0);
+		writer.writeI32(0);
+		writer.writeI32(0);
+		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
+	}
+
+	{
+		const auto &vector = requireVector("interaction_result_use_with");
+		ProtocolUnityPacketWriter writer(contract, ProtocolUnityOpcode::InteractionResult);
+		writer.writeU32(42);
+		writer.writeByte(3);
+		writer.writeByte(1);
+		writer.writeString("interaction_complete");
+		writer.writeByte(0);
+		writer.writeU32(800);
+		writer.writeU16(4);
+		writer.writeString("Sudden Death Rune");
 		EXPECT_EQ(vector.frameHex, bytesToHex(writer.finalize()));
 	}
 

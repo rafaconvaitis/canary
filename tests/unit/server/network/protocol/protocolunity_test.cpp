@@ -65,10 +65,14 @@ namespace {
 		ProtocolUnitySession::AttackHandler attackHandler = {},
 		ProtocolUnitySession::PickupHandler pickupHandler = {},
 		ProtocolUnitySession::DefenseHandler defenseHandler = {},
-		uint8_t supportedCapabilities = 1
+		uint8_t supportedCapabilities = 1,
+		ProtocolUnitySession::TurnHandler turnHandler = {},
+		ProtocolUnitySession::FollowHandler followHandler = {},
+		ProtocolUnitySession::FightModeHandler fightModeHandler = {},
+		ProtocolUnitySession::InteractionHandler interactionHandler = {}
 	) {
 		const auto &contract = getProtocolUnityContract();
-		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, supportedCapabilities, std::move(loginHandler), std::move(enterWorldHandler), std::move(movementHandler), std::move(attackHandler), std::move(pickupHandler), std::move(defenseHandler));
+		return ProtocolUnitySession(contract, "Canary ProtocolUnity", 4096, supportedCapabilities, std::move(loginHandler), std::move(enterWorldHandler), std::move(movementHandler), std::move(attackHandler), std::move(pickupHandler), std::move(defenseHandler), std::move(turnHandler), std::move(followHandler), std::move(fightModeHandler), std::move(interactionHandler));
 	}
 
 	[[nodiscard]] std::vector<uint8_t> buildClientHelloFrame(uint8_t capabilities) {
@@ -110,6 +114,52 @@ namespace {
 		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::DefendRequest);
 		writer.writeU32(actorId);
 		writer.writeByte(active ? 1 : 0);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildTurnRequestFrame(uint32_t actorId, uint8_t direction) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::TurnRequest);
+		writer.writeU32(actorId);
+		writer.writeByte(direction);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildFollowRequestFrame(uint32_t actorId, uint32_t targetId) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::FollowRequest);
+		writer.writeU32(actorId);
+		writer.writeU32(targetId);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildFightModeRequestFrame(uint32_t actorId, uint8_t mode, bool chase, bool safeFight) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::FightModeRequest);
+		writer.writeU32(actorId);
+		writer.writeByte(mode);
+		writer.writeByte(chase ? 1 : 0);
+		writer.writeByte(safeFight ? 1 : 0);
+		return writer.finalize();
+	}
+
+	[[nodiscard]] std::vector<uint8_t> buildInteractionRequestFrame(
+		uint32_t actorId,
+		uint8_t interaction,
+		const ProtocolUnityInteractionTarget &source,
+		const ProtocolUnityInteractionTarget &target
+	) {
+		ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::InteractionRequest);
+		writer.writeU32(actorId);
+		writer.writeByte(interaction);
+		auto writeTarget = [&writer](const ProtocolUnityInteractionTarget &value) {
+			writer.writeByte(static_cast<uint8_t>(value.kind));
+			writer.writeU32(value.entityId);
+			writer.writeI16(value.slotIndex);
+			writer.writeU16(value.itemTypeId);
+			writer.writeI32(value.position.x);
+			writer.writeI32(value.position.y);
+			writer.writeI32(value.position.floor);
+		};
+		writeTarget(source);
+		writeTarget(target);
 		return writer.finalize();
 	}
 
@@ -568,6 +618,272 @@ TEST(ProtocolUnitySessionTest, DefendRequestRequiresCapabilityAndDispatchesAutho
 	EXPECT_EQ(1, reader.readByte());
 	EXPECT_EQ(1, reader.readByte());
 	EXPECT_EQ("defense_entered", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, TurnRequestBeforeWorldEntryReturnsStructuredError) {
+	auto session = makeSession();
+	(void)session.handleFrame(ProtocolUnityContract::decodeHex(requireVector("client_hello_development").frameHex));
+
+	const auto action = session.handleFrame(buildTurnRequestFrame(1100, 2));
+
+	ASSERT_EQ(ProtocolUnitySessionState::AwaitingAuthentication, session.getState());
+	ASSERT_EQ(1U, action.outboundFrames.size());
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::ErrorMessage, response.opcode);
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ("invalid_state", reader.readString());
+	EXPECT_EQ("TurnRequest is only valid after world entry succeeds.", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, TurnRequestInWorldDispatchesAuthoritativeHandler) {
+	bool turnHandlerCalled = false;
+	auto session = makeSession(
+		[](std::string_view, std::string_view) {
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+			};
+			return response;
+		},
+		[](uint32_t, uint32_t) {
+			ProtocolUnityEnterWorldResponse response;
+			response.success = true;
+			response.selectionAccepted = true;
+			response.actorId = 1100;
+			return response;
+		},
+		{},
+		{},
+		{},
+		{},
+		1,
+		[&turnHandlerCalled](uint32_t actorId, uint8_t direction) {
+			turnHandlerCalled = true;
+			EXPECT_EQ(1100U, actorId);
+			EXPECT_EQ(2, direction);
+			ProtocolUnitySessionAction action;
+			ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::TurnResult);
+			writer.writeU32(actorId);
+			writer.writeByte(direction);
+			writer.writeByte(1);
+			writer.writeString("turned");
+			action.outboundFrames.emplace_back(writer.finalize());
+			return action;
+		}
+	);
+
+	(void)session.handleFrame(buildClientHelloFrame(1));
+	(void)session.handleFrame(buildLoginRequestFrame("dev.alpha", "plain-secret"));
+	(void)session.handleFrame(buildEnterWorldRequestFrame(11));
+	const auto action = session.handleFrame(buildTurnRequestFrame(1100, 2));
+
+	ASSERT_TRUE(turnHandlerCalled);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::TurnResult, response.opcode);
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ(1100U, reader.readU32());
+	EXPECT_EQ(2, reader.readByte());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ("turned", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, FollowAndFightModeRequestsDispatchAuthoritativeHandlers) {
+	bool followHandlerCalled = false;
+	bool fightModeHandlerCalled = false;
+	auto session = makeSession(
+		[](std::string_view, std::string_view) {
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+			};
+			return response;
+		},
+		[](uint32_t, uint32_t) {
+			ProtocolUnityEnterWorldResponse response;
+			response.success = true;
+			response.selectionAccepted = true;
+			response.actorId = 1100;
+			return response;
+		},
+		{},
+		{},
+		{},
+		{},
+		1,
+		{},
+		[&followHandlerCalled](uint32_t actorId, uint32_t targetId) {
+			followHandlerCalled = true;
+			EXPECT_EQ(1100U, actorId);
+			EXPECT_EQ(2200U, targetId);
+			ProtocolUnitySessionAction action;
+			ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::FollowResult);
+			writer.writeU32(actorId);
+			writer.writeU32(targetId);
+			writer.writeByte(1);
+			writer.writeByte(1);
+			writer.writeString("follow_started");
+			action.outboundFrames.emplace_back(writer.finalize());
+			return action;
+		},
+		[&fightModeHandlerCalled](uint32_t actorId, uint8_t mode, bool chase, bool safeFight) {
+			fightModeHandlerCalled = true;
+			EXPECT_EQ(1100U, actorId);
+			EXPECT_EQ(2, mode);
+			EXPECT_TRUE(chase);
+			EXPECT_TRUE(safeFight);
+			ProtocolUnitySessionAction action;
+			ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::FightModeResult);
+			writer.writeU32(actorId);
+			writer.writeByte(mode);
+			writer.writeByte(chase ? 1 : 0);
+			writer.writeByte(safeFight ? 1 : 0);
+			writer.writeByte(1);
+			writer.writeString("fight_mode_updated");
+			action.outboundFrames.emplace_back(writer.finalize());
+			return action;
+		}
+	);
+
+	(void)session.handleFrame(buildClientHelloFrame(1));
+	(void)session.handleFrame(buildLoginRequestFrame("dev.alpha", "plain-secret"));
+	(void)session.handleFrame(buildEnterWorldRequestFrame(11));
+	const auto followAction = session.handleFrame(buildFollowRequestFrame(1100, 2200));
+	const auto fightModeAction = session.handleFrame(buildFightModeRequestFrame(1100, 2, true, true));
+
+	ASSERT_TRUE(followHandlerCalled);
+	ASSERT_TRUE(fightModeHandlerCalled);
+	ASSERT_EQ(1U, followAction.outboundFrames.size());
+	ASSERT_EQ(1U, fightModeAction.outboundFrames.size());
+
+	const auto followResponse = decodeResponse(followAction.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::FollowResult, followResponse.opcode);
+	ProtocolUnityPacketReader followReader(followResponse.payload, getProtocolUnityContract());
+	EXPECT_EQ(1100U, followReader.readU32());
+	EXPECT_EQ(2200U, followReader.readU32());
+	EXPECT_EQ(1, followReader.readByte());
+	EXPECT_EQ(1, followReader.readByte());
+	EXPECT_EQ("follow_started", followReader.readString());
+	EXPECT_NO_THROW(followReader.expectFullyConsumed());
+
+	const auto fightModeResponse = decodeResponse(fightModeAction.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::FightModeResult, fightModeResponse.opcode);
+	ProtocolUnityPacketReader fightModeReader(fightModeResponse.payload, getProtocolUnityContract());
+	EXPECT_EQ(1100U, fightModeReader.readU32());
+	EXPECT_EQ(2, fightModeReader.readByte());
+	EXPECT_EQ(1, fightModeReader.readByte());
+	EXPECT_EQ(1, fightModeReader.readByte());
+	EXPECT_EQ(1, fightModeReader.readByte());
+	EXPECT_EQ("fight_mode_updated", fightModeReader.readString());
+	EXPECT_NO_THROW(fightModeReader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, InteractionRequestBeforeWorldEntryReturnsStructuredError) {
+	auto session = makeSession();
+	(void)session.handleFrame(buildClientHelloFrame(1));
+
+	ProtocolUnityInteractionTarget source {
+		.kind = ProtocolUnityInteractionTargetKind::InventorySlot,
+		.slotIndex = 11,
+		.itemTypeId = 3155,
+	};
+	ProtocolUnityInteractionTarget target {
+		.kind = ProtocolUnityInteractionTargetKind::Actor,
+		.entityId = 77,
+	};
+	const auto action = session.handleFrame(buildInteractionRequestFrame(
+		42,
+		static_cast<uint8_t>(ProtocolUnityWorldInteraction::UseWith),
+		source,
+		target
+	));
+
+	ASSERT_EQ(1U, action.outboundFrames.size());
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::ErrorMessage, response.opcode);
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ("invalid_state", reader.readString());
+	EXPECT_EQ("InteractionRequest is only valid after world entry succeeds.", reader.readString());
+	EXPECT_NO_THROW(reader.expectFullyConsumed());
+}
+
+TEST(ProtocolUnitySessionTest, InteractionRequestInWorldDispatchesTypedAuthoritativeHandler) {
+	bool interactionHandlerCalled = false;
+	auto session = makeSession(
+		[](std::string_view, std::string_view) {
+			ProtocolUnityLoginResponse response;
+			response.success = true;
+			response.accountId = 77;
+			response.characters = {
+				ProtocolUnityCharacterSummary { .characterId = 11, .name = "Knight", .position = { .x = 100, .y = 200, .floor = 7 } },
+			};
+			return response;
+		},
+		[](uint32_t, uint32_t) {
+			ProtocolUnityEnterWorldResponse response;
+			response.success = true;
+			response.selectionAccepted = true;
+			response.actorId = 42;
+			return response;
+		},
+		{},
+		{},
+		{},
+		{},
+		1,
+		{},
+		{},
+		{},
+		[&interactionHandlerCalled](uint32_t actorId, uint8_t interaction, const ProtocolUnityInteractionTarget &source, const ProtocolUnityInteractionTarget &target) {
+			interactionHandlerCalled = true;
+			EXPECT_EQ(42U, actorId);
+			EXPECT_EQ(static_cast<uint8_t>(ProtocolUnityWorldInteraction::UseWith), interaction);
+			EXPECT_EQ(ProtocolUnityInteractionTargetKind::InventorySlot, source.kind);
+			EXPECT_EQ(11, source.slotIndex);
+			EXPECT_EQ(3155, source.itemTypeId);
+			EXPECT_EQ(ProtocolUnityInteractionTargetKind::Actor, target.kind);
+			EXPECT_EQ(77U, target.entityId);
+
+			ProtocolUnitySessionAction action;
+			ProtocolUnityPacketWriter writer(getProtocolUnityContract(), ProtocolUnityOpcode::InteractionResult);
+			writer.writeU32(actorId);
+			writer.writeByte(interaction);
+			writer.writeByte(1);
+			writer.writeString("interaction_complete");
+			writer.writeByte(0);
+			writer.writeU32(800);
+			writer.writeU16(4);
+			writer.writeString("Sudden Death Rune");
+			action.outboundFrames.emplace_back(writer.finalize());
+			return action;
+		}
+	);
+
+	(void)session.handleFrame(buildClientHelloFrame(1));
+	(void)session.handleFrame(buildLoginRequestFrame("dev.alpha", "plain-secret"));
+	(void)session.handleFrame(buildEnterWorldRequestFrame(11));
+	const auto action = session.handleFrame(ProtocolUnityContract::decodeHex(requireVector("interaction_request_use_with").frameHex));
+
+	ASSERT_TRUE(interactionHandlerCalled);
+	ASSERT_EQ(1U, action.outboundFrames.size());
+	const auto response = decodeResponse(action.outboundFrames.front());
+	EXPECT_EQ(ProtocolUnityOpcode::InteractionResult, response.opcode);
+	ProtocolUnityPacketReader reader(response.payload, getProtocolUnityContract());
+	EXPECT_EQ(42U, reader.readU32());
+	EXPECT_EQ(static_cast<uint8_t>(ProtocolUnityWorldInteraction::UseWith), reader.readByte());
+	EXPECT_EQ(1, reader.readByte());
+	EXPECT_EQ("interaction_complete", reader.readString());
+	EXPECT_EQ(0, reader.readByte());
+	EXPECT_EQ(800U, reader.readU32());
+	EXPECT_EQ(4, reader.readU16());
+	EXPECT_EQ("Sudden Death Rune", reader.readString());
 	EXPECT_NO_THROW(reader.expectFullyConsumed());
 }
 
