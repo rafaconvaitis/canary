@@ -50,7 +50,8 @@
       "cacheVariables": {
         "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed/x64-windows-static-release-tests",
         "VCPKG_MANIFEST_FEATURES": "tests",
-        "CANARY_BUILD_TESTS": "ON"
+        "CANARY_BUILD_TESTS": "ON",
+        "SPEED_UP_BUILD_UNITY": "OFF"
       }
     },
     {

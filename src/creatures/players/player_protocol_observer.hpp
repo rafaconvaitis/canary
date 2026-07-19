@@ -12,6 +12,7 @@
 #ifndef USE_PRECOMPILED_HEADERS
 	#include <cstdint>
 	#include <memory>
+	#include <string_view>
 #endif
 
 class Player;
@@ -37,4 +38,6 @@ public:
 	virtual void onPlayerTileItemRemoved(const std::shared_ptr<const Player> &viewer, const Position &position, const std::shared_ptr<Item> &item) { }
 	virtual void onPlayerInventoryUpdated(const std::shared_ptr<const Player> &viewer, uint8_t slotIndex, const std::shared_ptr<Item> &item) { }
 	virtual void onPlayerCombatResult(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &target, int32_t damage, bool targetDied) { }
+	virtual void onPlayerDefenseStanceChanged(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &defender, bool active) { }
+	virtual void onPlayerDefenseImpact(const std::shared_ptr<const Player> &viewer, const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &defender, uint8_t blockType, int32_t incomingDamage, int32_t appliedDamage) { }
 };

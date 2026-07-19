@@ -7650,6 +7650,7 @@ bool Game::combatBlockHit(CombatDamage &damage, const std::shared_ptr<Creature> 
 		auto chance = targetPlayer->getDodgeChance();
 		if ((chance > 0 && uniform_random(0, 10000) < chance) || damage.hazardDodge) {
 			InternalGame::sendBlockEffect(BLOCK_DODGE, damage.primary.type, target->getPosition(), attacker);
+			targetPlayer->notifyProtocolDefenseImpact(attacker, BLOCK_DODGE, std::abs(damage.primary.value), 0);
 			targetPlayer->sendTextMessage(MESSAGE_ATTENTION, "You dodged an attack.");
 			return true;
 		}

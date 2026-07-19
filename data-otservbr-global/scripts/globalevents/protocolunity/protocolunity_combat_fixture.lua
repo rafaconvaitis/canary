@@ -1,6 +1,11 @@
 local fixtureRuntimePath = "protocolunity-combat-fixture.lua"
 local pickupProbeItemId = 3091
 local loginRefreshGeneration = 0
+local dedicatedAreaReady = false
+local protocolUnityViewRadiusX = 8
+local protocolUnityViewRadiusY = 6
+local protocolUnityViewPositiveOffsetX = protocolUnityViewRadiusX + 1
+local protocolUnityViewPositiveOffsetY = protocolUnityViewRadiusY + 1
 local formationPatterns = {
 	{ alpha = { x = -1, y = 0 }, beta = { x = 1, y = 0 } },
 	{ alpha = { x = 1, y = 0 }, beta = { x = -1, y = 0 } },
@@ -9,6 +14,7 @@ local formationPatterns = {
 }
 
 local function tryLoadFixture()
+	local fixtureEnabledFlag = os.getenv("TIBIAUNITY_PROTOCOLUNITY_FIXTURE")
 	local file = io.open(fixtureRuntimePath, "r")
 	if not file then
 		return nil
@@ -25,11 +31,81 @@ local function tryLoadFixture()
 		return nil
 	end
 
+	if fixtureOrError.developmentOnly and fixtureEnabledFlag ~= "1" then
+		logger.info("[ProtocolUnityCombatFixture] Ignored {} because development-only mode is disabled", fixtureRuntimePath)
+		return nil
+	end
+
 	return fixtureOrError
 end
 
 local function toPosition(value)
 	return Position(value.x, value.y, value.z)
+end
+
+local function isInsideConfiguredBox(x, y, box)
+	return box
+		and box.from
+		and box.to
+		and x >= box.from.x and x <= box.to.x
+		and y >= box.from.y and y <= box.to.y
+end
+
+local function resolveDevelopmentGroundId(area, x, y)
+	if isInsideConfiguredBox(x, y, area.bridge) then
+		return area.dirtGroundId
+	end
+
+	local center = area.center
+	local diagonal = (x - center.x) - (y - center.y) - (area.riverOffset or 0)
+	if math.abs(diagonal) <= (area.riverHalfWidth or 0) then
+		return area.waterGroundId
+	end
+
+	local pathDistance = math.abs((x - center.x) + math.floor((y - center.y) * 0.55))
+	if pathDistance <= 1 and math.abs(y - center.y) <= 15 then
+		return area.dirtGroundId
+	end
+
+	return area.grassGroundId
+end
+
+local function ensureDedicatedDevelopmentArea(fixture)
+	local area = fixture.developmentArea
+	if dedicatedAreaReady or not area or not area.enabled then
+		return true
+	end
+
+	if not fixture.developmentOnly or os.getenv("TIBIAUNITY_PROTOCOLUNITY_FIXTURE") ~= "1" then
+		logger.error("[ProtocolUnityCombatFixture] Refused to create dedicated area outside development-only fixture mode")
+		return false
+	end
+
+	local createdTiles = 0
+	local createdGrounds = 0
+	for x = area.bounds.from.x, area.bounds.to.x do
+		for y = area.bounds.from.y, area.bounds.to.y do
+			local position = Position(x, y, area.bounds.from.z)
+			local tile = Tile(position) or Game.createTile(position, true)
+			if tile then
+				createdTiles = createdTiles + 1
+				if not tile:getGround() then
+					local groundId = resolveDevelopmentGroundId(area, x, y)
+					if Game.createItem(groundId, 1, position) then
+						createdGrounds = createdGrounds + 1
+					end
+				end
+			end
+		end
+	end
+
+	dedicatedAreaReady = createdTiles > 0 and createdGrounds > 0
+	logger.info(
+		"[ProtocolUnityCombatFixture] Prepared development-only Golden Clearing area with {} tiles and {} grounds",
+		createdTiles,
+		createdGrounds
+	)
+	return dedicatedAreaReady
 end
 
 local function hasBlockingItem(tile)
@@ -114,6 +190,61 @@ local function buildFixtureArea(alphaPosition, betaPosition, targetPosition, pad
 	}
 end
 
+local function buildProtocolUnityViewportArea(anchorPosition, padding)
+	local margin = padding or 0
+	return {
+		from = {
+			x = anchorPosition.x - protocolUnityViewRadiusX - margin,
+			y = anchorPosition.y - protocolUnityViewRadiusY - margin,
+			z = anchorPosition.z,
+		},
+		to = {
+			x = anchorPosition.x + protocolUnityViewPositiveOffsetX + margin,
+			y = anchorPosition.y + protocolUnityViewPositiveOffsetY + margin,
+			z = anchorPosition.z,
+		},
+	}
+end
+
+local function countFormationVisualNoise(fixture, formation)
+	local alphaName = fixture.players and fixture.players.alpha and fixture.players.alpha.name
+	local betaName = fixture.players and fixture.players.beta and fixture.players.beta.name
+	local targetName = fixture.target and fixture.target.name
+	local noise = 0
+	local viewportArea = buildProtocolUnityViewportArea(formation.alpha, 0)
+
+	for x = viewportArea.from.x, viewportArea.to.x do
+		for y = viewportArea.from.y, viewportArea.to.y do
+			local tile = Tile(Position(x, y, formation.alpha.z))
+			if tile then
+				local creature = tile:getTopCreature()
+				if creature then
+					if creature:isPlayer() then
+						local playerName = creature:getName()
+						if playerName ~= alphaName and playerName ~= betaName then
+							noise = noise + 6
+						end
+					elseif creature:getName() ~= targetName then
+						noise = noise + 10
+					end
+				end
+
+				local items = tile:getItems()
+				if items then
+					for index = 1, tile:getItemCount() do
+						local item = items[index]
+						if item and item:getId() ~= pickupProbeItemId and item:getType():isMovable() then
+							noise = noise + 1
+						end
+					end
+				end
+			end
+		end
+	end
+
+	return noise
+end
+
 local function collectSearchPositions(origin, radius)
 	local positions = {}
 	for distance = 0, radius do
@@ -157,6 +288,15 @@ local function resolvePickupProbePosition(formation)
 	return nil
 end
 
+local function resolvePickupProbeFromFixture(fixture, formation)
+	local pickupProbe = fixture.formation and fixture.formation.pickupProbe
+	if pickupProbe then
+		return Position(pickupProbe.x, pickupProbe.y, pickupProbe.z)
+	end
+
+	return resolvePickupProbePosition(formation)
+end
+
 local function hasClearSight(fromPosition, toPosition)
 	if not fromPosition or not toPosition then
 		return false
@@ -174,9 +314,10 @@ local function cleanupArea(area)
 				removeCreatureIfNeeded(tile:getTopCreature())
 				local items = tile:getItems()
 				if items then
+					-- Unity owns scenery in this isolated development area; clear corpse containers too.
 					for index = #items, 1, -1 do
 						local item = items[index]
-						if item and item:getType():isMovable() then
+						if item then
 							item:remove()
 						end
 					end
@@ -210,7 +351,44 @@ local function resolveFixturePlayerKey(fixture, player)
 	return nil
 end
 
+local function resolveStaticFormation(fixture)
+	if not fixture.formation or not fixture.formation.alpha or not fixture.formation.beta or not fixture.formation.target then
+		return nil
+	end
+
+	local alphaPosition = toPosition(fixture.formation.alpha)
+	local betaPosition = toPosition(fixture.formation.beta)
+	local targetPosition = toPosition(fixture.formation.target)
+	local cleanupRadius = fixture.search and fixture.search.cleanupRadius or (fixture.search and fixture.search.areaPadding) or 3
+
+	if not canUseFixtureTile(alphaPosition, fixture.players and fixture.players.alpha and fixture.players.alpha.name) then
+		return nil
+	end
+
+	if not canUseFixtureTile(betaPosition, fixture.players and fixture.players.beta and fixture.players.beta.name) then
+		return nil
+	end
+
+	local targetTile = Tile(targetPosition)
+	if not targetTile or not targetTile:getGround() or targetTile:hasFlag(TILESTATE_PROTECTIONZONE) or hasBlockingItem(targetTile) then
+		return nil
+	end
+
+	return {
+		alpha = alphaPosition,
+		beta = betaPosition,
+		target = targetPosition,
+		area = buildFixtureArea(alphaPosition, betaPosition, targetPosition, cleanupRadius),
+		viewportArea = buildProtocolUnityViewportArea(alphaPosition, 1),
+	}
+end
+
 local function resolveFixtureFormation(fixture)
+	local staticFormation = resolveStaticFormation(fixture)
+	if staticFormation then
+		return staticFormation
+	end
+
 	local search = fixture.search or {}
 	local originValue = search.origin
 	if not originValue then
@@ -226,6 +404,8 @@ local function resolveFixtureFormation(fixture)
 	local origin = toPosition(originValue)
 	local searchRadius = search.radius or 18
 	local areaPadding = search.areaPadding or 3
+	local bestFormation = nil
+	local bestNoise = math.huge
 
 	for _, targetPosition in ipairs(collectSearchPositions(origin, searchRadius)) do
 		if isSpawnableTargetTile(targetPosition) then
@@ -236,18 +416,27 @@ local function resolveFixtureFormation(fixture)
 					and canUseFixtureTile(betaPosition, betaSlot.name)
 					and hasClearSight(alphaPosition, targetPosition)
 					and hasClearSight(betaPosition, targetPosition) then
-					return {
+					local formation = {
 						alpha = alphaPosition,
 						beta = betaPosition,
 						target = targetPosition,
 						area = buildFixtureArea(alphaPosition, betaPosition, targetPosition, areaPadding),
+						viewportArea = buildProtocolUnityViewportArea(alphaPosition, 1),
 					}
+					local noise = countFormationVisualNoise(fixture, formation)
+					if noise < bestNoise then
+						bestFormation = formation
+						bestNoise = noise
+						if bestNoise == 0 then
+							return bestFormation
+						end
+					end
 				end
 			end
 		end
 	end
 
-	return nil
+	return bestFormation
 end
 
 local function teleportFixturePlayers(fixture, formation)
@@ -255,6 +444,7 @@ local function teleportFixturePlayers(fixture, formation)
 		local player = slot and slot.name and Player(slot.name) or nil
 		local destination = formation[slotKey]
 		if player and destination then
+			player:removeCondition(CONDITION_PARALYZE)
 			player:teleportTo(destination)
 			player:getPosition():sendMagicEffect(CONST_ME_TELEPORT)
 		end
@@ -282,6 +472,40 @@ local function spawnFixtureTarget(fixture, formation)
 	return false
 end
 
+local function spawnAuxiliaryCreatures(fixture)
+	local anchorName = fixture.players and fixture.players.alpha and fixture.players.alpha.name
+	local anchorPlayer = anchorName and Player(anchorName) or nil
+	local keepAllPassiveForSoak = os.getenv("TIBIAUNITY_PROTOCOLUNITY_SOAK") == "1"
+	for _, definition in ipairs(fixture.auxiliaryCreatures or {}) do
+		local position = toPosition(definition.position)
+		local tile = Tile(position)
+		if tile and not tile:getTopCreature() then
+			local creature = Game.createMonster(definition.name, position, false, false)
+			if not creature then
+				creature = Game.createMonster(definition.name, position, true, false)
+			end
+
+			if creature then
+				local keepPassive = keepAllPassiveForSoak or definition.name ~= "Golden Moss Beast"
+				if definition.name == "Golden Moss Beast" then
+					creature:setMoveLocked(true)
+				end
+				if keepPassive then
+					if keepAllPassiveForSoak and anchorPlayer then
+						creature:setMaster(anchorPlayer)
+					end
+					creature:setTarget(nil)
+					creature:setFollowCreature(nil)
+					creature:setMoveLocked(true)
+				end
+				logger.info("[ProtocolUnityCombatFixture] Spawned auxiliary {} at {}", definition.name, position:toString())
+			else
+				logger.warn("[ProtocolUnityCombatFixture] Could not spawn auxiliary {} at {}", definition.name, position:toString())
+			end
+		end
+	end
+end
+
 local function refreshFixtureTarget(fixture, reason)
 	local formation = resolveFixtureFormation(fixture)
 	if not formation then
@@ -296,6 +520,7 @@ local function refreshFixtureTarget(fixture, reason)
 	end
 
 	cleanupArea(formation.area)
+	cleanupArea(formation.viewportArea)
 	teleportFixturePlayers(fixture, formation)
 
 	if not spawnFixtureTarget(fixture, formation) then
@@ -303,7 +528,9 @@ local function refreshFixtureTarget(fixture, reason)
 		return false
 	end
 
-	local pickupProbePosition = resolvePickupProbePosition(formation)
+	spawnAuxiliaryCreatures(fixture)
+
+	local pickupProbePosition = resolvePickupProbeFromFixture(fixture, formation)
 	if pickupProbePosition then
 		spawnPickupProbe(pickupProbePosition)
 	else
@@ -323,6 +550,7 @@ local function cleanupResolvedFormation(fixture)
 	local formation = resolveFixtureFormation(fixture)
 	if formation then
 		cleanupArea(formation.area)
+		cleanupArea(formation.viewportArea)
 	else
 		logger.warn("[ProtocolUnityCombatFixture] Startup cleanup could not resolve a combat formation for fixture {}", fixture.fixtureName or "(unnamed)")
 	end
@@ -350,6 +578,7 @@ local function resetLoginPlayer(player, fixture)
 	end
 
 	cleanupArea(formation.area)
+	cleanupArea(formation.viewportArea)
 	teleportFixturePlayers(fixture, formation)
 
 	if not isInsideArea(player:getPosition(), formation.area) then
@@ -361,6 +590,8 @@ local function resetLoginPlayer(player, fixture)
 		logger.error("[ProtocolUnityCombatFixture] Could not respawn {} for {}", fixture.target.name, player:getName())
 		return false
 	end
+
+	spawnAuxiliaryCreatures(fixture)
 
 	return true
 end
@@ -440,6 +671,11 @@ local function prepareFixtureOnStartup(fixture)
 end
 
 local function initializeFixture(fixture)
+	if not ensureDedicatedDevelopmentArea(fixture) then
+		logger.error("[ProtocolUnityCombatFixture] Dedicated Golden Clearing area preparation failed")
+		return
+	end
+
 	if fixture.search and fixture.search.origin then
 		cleanupResolvedFormation(fixture)
 		return
@@ -486,6 +722,10 @@ local function scheduleLoginRefresh(playerId)
 	end, 400)
 end
 
+local function cancelScheduledLoginRefresh()
+	loginRefreshGeneration = loginRefreshGeneration + 1
+end
+
 local function onFixtureStartup()
 	local fixture = tryLoadFixture()
 	if not fixture then
@@ -508,7 +748,18 @@ local function onFixtureLogin(player)
 		return true
 	end
 
-	scheduleLoginRefresh(player:getId())
+	local refreshed = refreshFixtureForPlayer(player, fixture)
+	if not refreshed then
+		logger.warn("[ProtocolUnityCombatFixture] Immediate login refresh failed for {}; scheduling retry", player:getName())
+		scheduleLoginRefresh(player:getId())
+		return true
+	end
+
+	if not areFixturePlayersOnline(fixture) then
+		scheduleLoginRefresh(player:getId())
+	else
+		cancelScheduledLoginRefresh()
+	end
 
 	return true
 end

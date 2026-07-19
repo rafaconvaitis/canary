@@ -1021,6 +1021,41 @@ void Player::clearProtocolObserver() {
 	protocolObserver.reset();
 }
 
+void Player::notifyProtocolDefenseStanceChanged(bool active) {
+	const auto defender = getPlayer();
+	for (const auto &spectator : Spectators().find<Player>(getPosition(), true)) {
+		const auto &spectatorPlayer = spectator->getPlayer();
+		if (!spectatorPlayer) {
+			continue;
+		}
+
+		if (const auto &observer = spectatorPlayer->protocolObserver.lock()) {
+			observer->onPlayerDefenseStanceChanged(spectatorPlayer, defender, active);
+		}
+	}
+}
+
+void Player::notifyProtocolDefenseImpact(const std::shared_ptr<Creature> &attacker, BlockType_t blockType, int32_t incomingDamage, int32_t appliedDamage) {
+	const auto defender = getPlayer();
+	for (const auto &spectator : Spectators().find<Player>(getPosition(), true)) {
+		const auto &spectatorPlayer = spectator->getPlayer();
+		if (!spectatorPlayer) {
+			continue;
+		}
+
+		if (const auto &observer = spectatorPlayer->protocolObserver.lock()) {
+			observer->onPlayerDefenseImpact(
+				spectatorPlayer,
+				attacker,
+				defender,
+				static_cast<uint8_t>(blockType),
+				std::max(0, incomingDamage),
+				std::max(0, appliedDamage)
+			);
+		}
+	}
+}
+
 bool Player::hasSecureMode() const {
 	return secureMode;
 }
@@ -3845,12 +3880,14 @@ bool Player::isPzLocked() const {
 }
 
 BlockType_t Player::blockHit(const std::shared_ptr<Creature> &attacker, const CombatType_t &combatType, int32_t &damage, bool checkDefense, bool checkArmor, bool field) {
+	const int32_t incomingDamage = std::max(0, damage);
 	BlockType_t blockType = Creature::blockHit(attacker, combatType, damage, checkDefense, checkArmor, field);
 	if (attacker) {
 		sendCreatureSquare(attacker, SQ_COLOR_BLACK);
 	}
 
 	if (blockType != BLOCK_NONE) {
+		notifyProtocolDefenseImpact(attacker, blockType, incomingDamage, damage);
 		return blockType;
 	}
 
@@ -3914,6 +3951,7 @@ BlockType_t Player::blockHit(const std::shared_ptr<Creature> &attacker, const Co
 		}
 	}
 
+	notifyProtocolDefenseImpact(attacker, blockType, incomingDamage, damage);
 	return blockType;
 }
 
